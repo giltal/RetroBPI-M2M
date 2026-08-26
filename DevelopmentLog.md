@@ -3768,6 +3768,130 @@ To read the address on the board, with no extra tools:
 Note `/sys/class/bluetooth/hci0/address` does not exist on this kernel, and
 `hciconfig` is not built.
 
+## 2026-08-27 — Boot time: a 10.3 s self-inflicted regression, and the floor underneath it
+
+Boot had drifted from the 4.92 s recorded earlier to roughly 12 s. The cause was
+mine, added in the network-hotplug session.
+
+### The regression: udev waits for a pipe, not for a process
+
+`/run/boottiming` (the rcS profiler, which is why it ships) attributed it in one
+read -- every script under 0.2 s except one:
+
+```
+S10udevd   10.55 s   (5.22 -> 15.77)
+```
+
+Timing the three steps separately: `udevadm trigger` 0.19 s combined, and
+`udevadm settle` **10.33 s**. Almost nothing appeared in the kernel log during
+that window, so udev was blocked in a rule, not on hardware.
+
+The rule was `70-net-hotplug.rules` -> `/usr/sbin/net-hotplug`, whose carrier
+wait is `while [ $i -lt 10 ]; do ... sleep 1; done`. Ten iterations, ten seconds.
+The script *did* background that work and exit immediately, and its comment even
+said "udev serialises RUN+= and kills slow rules, so the work is backgrounded"
+-- which was the wrong mental model:
+
+**udev does not wait for the RUN program to exit. It waits for the stdout/stderr
+pipe it handed that program to reach EOF.** A `( ... ) &` subshell inherits those
+descriptors and holds the pipe open for its whole lifetime. Redirecting the inner
+`udhcpc` was not enough; the subshell itself had to give up all three
+descriptors. Fix: `setsid /bin/sh -c '...' </dev/null >/dev/null 2>&1 &`.
+
+Isolated on the board, reproducing exactly what udev does (`| cat` cannot finish
+until every holder of the write end is gone):
+
+```
+bad.sh  ( sleep 3 ) &                                  pipe closed after 3.02 s
+good.sh setsid sh -c 'sleep 3' </dev/null >/dev/null &  pipe closed after 0.01 s
+```
+
+Result: settle 10.33 -> 0.41 s, S10udevd 10.55 -> 0.64 s, and DHCP still works.
+
+### Then four hypotheses, three of them wrong
+
+`S01syslogd` was next at 1.63-1.71 s, against 0.02 s when restarted by hand.
+
+- **Entropy.** Plausible: this project already knew udevd, the BT agent and
+  dropbear all block on `crng init`. Rebuilt the `seed-credit` tool deleted in an
+  earlier session; it reproduced its old result exactly (crng 3.5 s -> 2.1 s,
+  reliably). syslogd still took 1.63 s with the CRNG ready at 2.06 s. **Refuted.**
+- **Cold page cache.** `drop_caches` then restart: 0.03 s. **Refuted.**
+- **CPU frequency** (S05powercap sets `performance`, and it runs *after* S01).
+  Forced via `scaling_max_freq`: 0.11 s at 120 MHz, 0.02 s at 1.2 GHz. Not 1.6 s.
+  **Refuted.** (First attempt wrote `powersave` to `scaling_governor` -- not an
+  available governor here, so the write silently failed and the "test" ran at
+  1.2 GHz. A test that cannot fail proves nothing.)
+- **Instrumented inside the script instead of guessing again.** `start()`'s body
+  took 0.10 s; **0.83 s elapsed before its first line ran**. The cost was the
+  script failing to get going -- because `S01seedrng` had just backgrounded
+  `seedrng`, which regenerates the next seed and `fsync()`s it to the SD card.
+
+Splitting those halves -- credit synchronously (`seed-credit`), regenerate later
+(`S51seedrefresh`) -- moved rcS end from 5.33 s to 3.80 s.
+
+### The floor: the boot is I/O-bound
+
+Time-to-UI refused to move, across four different configurations:
+
+```
+                                   launch   rcS end   ready
+baseline (udev fixed)                4.72      5.33    5.48
++ seed-credit                        4.86      5.48    5.62
++ regeneration deferred to S51       3.16      3.80    5.46
++ brcmfmac deferred behind launcher  3.18      3.93    5.46
+syslogd/klogd moved behind launcher  4.14      4.80    4.93
+```
+
+Init finishes 1.5 s earlier and far more consistently, but `ready` sits at ~5.46 s
+no matter what. The launcher simply absorbs the wait -- its self-reported init
+stretched from 740 ms to 2498 ms as it was moved earlier. Measured directly:
+
+```
+launcher init, idle + warm cache :  317 ms
+launcher init, idle + cold cache :  603 ms
+launcher init, during boot       : 2498 ms
+```
+
+It needs ~600 ms of its own; the rest is contention for the card. **Reordering
+redistributes I/O, it does not reduce it**, which is why entropy, script order and
+the Wi-Fi driver all landed on the same number. Further gains need less total I/O
+or faster reads, not a different order.
+
+The brcmfmac deferral was reverted: it worked (firmware request moved 3.06 ->
+3.78 s) and bought nothing, so it was not worth the complexity of blacklisting a
+driver. The syslogd/klogd reorder was also dropped -- its apparent 0.55 s win was
+confounded (crng averaged 3.52 s in the baseline runs vs 3.21 s in its own), and
+it costs early-boot logging.
+
+Raising SD readahead to 1024k -- the one lever that attacks total I/O rather than
+its order -- made things **worse**, consistently across all four runs:
+
+```
+                 udev   launch   rcS end   ready
+default 128k     0.63     3.16      3.80    5.46
+readahead 1024k  0.73     3.45      4.17    5.83
+```
+
+Boot reads are scattered, not sequential, so a larger readahead window mostly
+fetches pages nobody wants and spends card bandwidth doing it. Reverted.
+
+### Where it landed
+
+```
+before this session : ~12 s   (regressed from 4.92 s by the udev rule)
+after               : ~5.5 s to UI, rcS complete at 3.8 s
+```
+
+Kept: the net-hotplug fd fix (worth 10.3 s), `seed-credit`, and
+`S51seedrefresh`. Rejected with measurements: script reordering, deferring
+brcmfmac, SD readahead.
+
+**What would actually move the number now** is reducing what the boot reads --
+the launcher pulls in SDL2, SDL2_image, SDL2_ttf, mesa and fonts, and needs
+~600 ms of I/O even on an idle system with a cold cache. That is the remaining
+target, not the init sequence.
+
 ### Current state (2026-08-26)
 
 `firmware/sdcard.img` md5 `339c0641bebefd3b7cca0cde1060ea43`. Board verified
