@@ -3482,6 +3482,40 @@ all three fixes are present in the freshly patched source.
   kernel and mesa3d. Checking only the package dir led to a wrong "no patches for
   fuse" conclusion during this investigation. Check both.
 
+### Published to GitHub
+
+**https://github.com/giltal/RetroBPI-M2M** — public, GPL-2.0-or-later.
+
+68 MB cloned. `firmware/` is gitignored in full: the sdcard image (2.6 GB), ROM
+partition (2.0 GB), kernels, DTBs, u-boot, launcher binary and the staging
+snapshots are all reproducible from source, and git stores a whole copy of every
+changed binary. An initial `.gitignore` that only excluded `*.img` and `*.vfat`
+still let 31.6 MB of stale binaries into the first commit.
+
+`buildroot-external/package/retroarch/retroarch/retro-assets/` (94 MB) **is**
+tracked, deliberately: `retroarch.mk:45` copies it into the target, so it is a
+build input. That is most of the 68 MB.
+
+Added alongside: `README.md`, `BUILDING.md` (host requirements, Buildroot 2026.02.3
+setup, what the builder supplies themselves), `LICENSE`, `NOTICE`.
+
+#### Two things worth remembering
+
+**`.gitattributes` forces LF** for everything the Linux side consumes -- shell
+scripts, patches, init scripts, C sources, configs. The host is Windows and git
+was set to convert LF to CRLF on checkout, which would have handed anyone cloning
+this a tree full of scripts that fail on the board in confusing ways. This project
+has already lost time to stray CRLFs, including a patch that silently matched
+nothing because the target file used them.
+
+**GitHub's licence detector needs a verbatim match.** A scope note prepended to
+`LICENSE` produced `licenseInfo: null`. Moving it to `NOTICE` and leaving `LICENSE`
+as the unmodified GPL body -- copied from Buildroot's `COPYING`, not reconstructed
+-- makes it register as GPL-2.0.
+
+The root password `retrobpi` in the defconfig is public and permanent in history.
+Raised before publishing; Gil's call was to leave it.
+
 ### Current state (2026-08-26)
 
 `firmware/sdcard.img` md5 `39c50ee53dfde661724d71b6e40a311a`. Board verified
