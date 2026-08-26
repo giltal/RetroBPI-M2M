@@ -1,0 +1,84 @@
+#!/bin/sh
+#
+# Match the CPU/backlight ceiling to whichever supply is actually feeding the board.
+#
+# The AXP223 has two independent inputs.  DCIN (ACIN) is the real barrel/pad supply;
+# VBUS is the micro-USB path, and the PMIC hard-caps that one at 900 mA -- 4.5 W for
+# the SoC, SD, Wi-Fi and the 5" panel together.  An A33 with 3+ cores busy at 1.2 GHz
+# plus a lit backlight exceeds it, the rail sags under the 4.4 V VHOLD threshold, and
+# the PMIC drops the input.  The symptom is a silent reset straight to SPL with no
+# kernel output at all -- Linux never gets a chance to complain.
+#
+# Measured on this board, panel attached:
+#
+#   VBUS only, 1.2 GHz, backlight 255 : 3 busy loops     -> reset
+#   VBUS only,  648 MHz, backlight  80 : 4 busy loops     -> survives
+#   DCIN,      1.2 GHz, backlight 255 : 4 busy loops 30 s -> survives
+#
+# Boot reliability over 5 reboots: 4/5 on VBUS (the loser resets at ~2.2 s during USB
+# controller bring-up, before this script can run), 5/5 on DCIN.
+#
+# So: if DCIN is present we take the cap off entirely and run at full speed, which is
+# what RetroArch needs.  If the board is on USB power only we clamp, which keeps it
+# usable rather than resetting under load.  Runs before S10udevd because udev coldplug
+# forks a worker per uevent and is the largest single load spike of the boot.
+
+AC_ONLINE=/sys/class/power_supply/axp22x-ac/online
+
+CAPPED_FREQ=648000
+CAPPED_BACKLIGHT=80
+
+start() {
+	if [ "$(cat $AC_ONLINE 2>/dev/null)" = "1" ]; then
+		# On the real supply, pin the governor rather than letting schedutil
+		# scale on demand.  schedutil reacts to load *after* it appears, which
+		# is the wrong behaviour underneath a real-time audio thread: it was
+		# measured dipping to 1104 MHz mid-game, and each dip costs buffers.
+		#
+		# Measured on Mario Kart 64, polling the PCM substream 10x/s for 15 s
+		# and counting hw_ptr going backwards (an underrun re-preparing the
+		# stream), three interleaved rounds each:
+		#
+		#   schedutil    xruns 10 / 9 / 9    non-RUNNING 21 / 18 / 18
+		#   performance  xruns  6 / 6 / 6    non-RUNNING 13 / 11 / 13
+		#
+		# Roughly a third fewer underruns, and performance won every round.
+		# N64 is the only system that pushes the SoC hard enough to care, but
+		# nothing else is harmed by it.
+		#
+		# Deliberately NOT applied on the VBUS path below: there the governor
+		# is left alone so the CPU can still drop to idle frequencies and stay
+		# inside the 900 mA budget.  performance would hold it at the capped
+		# 648 MHz continuously, which is exactly what that budget cannot spare.
+		echo "Power: DCIN present, running unrestricted"
+		printf "Power: pinning cpufreq governor to performance: "
+		for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+			[ -w "$g" ] && echo performance > "$g" 2>/dev/null
+		done
+		echo "$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)"
+		return 0
+	fi
+
+	printf "Power: DCIN absent, clamping to the 900 mA VBUS budget: "
+	for c in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do
+		[ -w "$c" ] && echo "$CAPPED_FREQ" > "$c" 2>/dev/null
+	done
+	for b in /sys/class/backlight/*/brightness; do
+		[ -w "$b" ] && echo "$CAPPED_BACKLIGHT" > "$b" 2>/dev/null
+	done
+	echo "OK"
+}
+
+case "$1" in
+	start)
+		start;;
+	stop)
+		;;
+	restart|reload)
+		start;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+esac
+
+exit 0

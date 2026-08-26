@@ -1,0 +1,49 @@
+config BR2_PACKAGE_RETROBPI_LAUNCHER
+	bool "retrobpi-launcher"
+	depends on BR2_PACKAGE_HAS_UDEV
+	select BR2_PACKAGE_LIBDRM
+	select BR2_PACKAGE_SDL2
+	select BR2_PACKAGE_SDL2_TTF
+	select BR2_PACKAGE_SDL2_IMAGE
+	# sdl2_image only builds PNG support if libpng is selected, and the
+	# launcher hard-fails on IMG_Init(IMG_INIT_PNG).
+	select BR2_PACKAGE_LIBPNG
+	select BR2_PACKAGE_FREETYPE
+	help
+	  Retro gaming launcher: DRM/KMS framebuffer UI with system browser,
+	  ROM list, favourites, recents, themes, touch search keyboard and
+	  save-state slot picker. Launches RetroArch and re-initialises on exit.
+
+	  Ported from the LyraZeroW SuperRetroPack project.
+
+if BR2_PACKAGE_RETROBPI_LAUNCHER
+
+config BR2_PACKAGE_RETROBPI_LAUNCHER_PANEL_W
+	int "panel width"
+	default 800
+	help
+	  800 for the Waveshare 5" DSI LCD (B), 1024 for the EK79007 7".
+
+config BR2_PACKAGE_RETROBPI_LAUNCHER_PANEL_H
+	int "panel height"
+	default 480
+	help
+	  480 for the Waveshare 5" DSI LCD (B), 600 for the EK79007 7".
+
+config BR2_PACKAGE_RETROBPI_LAUNCHER_PANEL_ROTATION
+	int "panel rotation (degrees)"
+	default 0
+	help
+	  Degrees the launcher must rotate its output so the UI appears
+	  upright, determined by how the panel is physically mounted in the
+	  case. Only 0 and 180 are implemented.
+
+	  This is build-time on purpose, not a runtime setting: the mounting
+	  is a property of the hardware, not a user preference, and a wrong
+	  value would invert the very menu needed to change it back.
+
+	  RetroArch is rotated separately via video_rotation in its config,
+	  and the touchscreen separately again in the device tree. The panel
+	  DT node carries `rotation` as the canonical record of the fact.
+
+endif

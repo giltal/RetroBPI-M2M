@@ -1,0 +1,107 @@
+#!/bin/sh
+#
+# Restore the ALSA mixer state.
+#
+# The sun8i codec powers up muted and at zero, and Buildroot's alsa-utils
+# package ships no init script of its own -- so without this the device is
+# silent on every boot no matter what RetroArch is configured to do.
+#
+# TWO separate bugs have hidden here, and the second is why this script checks
+# what it checks:
+#
+# 1. `alsactl restore` reports OK when it faithfully restores a *muted*
+#    snapshot. Build #37 shipped exactly that, because the state was captured
+#    after a reboot had already re-muted the codec. So restoring is not enough;
+#    the result has to be verified.
+#
+# 2. Verifying only "Headphone" was not enough either. The playback path has
+#    several gain stages, and 'AIF1 DA0 Playback Volume' -- the digital volume
+#    between the I2S interface and the DAC -- sat at 0 while Headphone read a
+#    healthy 79%. On this codec the scale is
+#        DECLARE_TLV_DB_SCALE(sun8i_codec_vol_scale, -12000, 75, 1)
+#    i.e. -120 dB, 0.75 dB per step, and the trailing 1 means MUTE AT MINIMUM.
+#    So 0 is not "quiet", it is off, and 0 dB is index 160 of 192. Every DAPM
+#    widget read "On", the DMA advanced at exactly real time, and no analog
+#    audio came out at all -- on headphones or the speaker.
+#
+# The lesson: check the whole path, not the one control you happen to be
+# looking at. A single muted stage anywhere makes everything downstream
+# irrelevant, and nothing else in the system complains.
+#
+# S35 so it runs after udev (S10) has created /dev/snd and before anything that
+# plays audio.
+
+CARD=0
+
+# Full-name control access: `amixer sset` uses the SIMPLE mixer namespace,
+# which does not carry these names ("Unable to find simple control
+# 'AIF1 DA0 Playback Volume'"). cset with name= uses the control interface.
+cget() { amixer -c $CARD cget name="$1" 2>/dev/null | grep -m1 '^  : values' | sed 's/.*values=//'; }
+cset() { amixer -c $CARD cset name="$1" "$2" >/dev/null 2>&1; }
+
+# Is the whole playback chain actually able to pass audio?
+path_audible() {
+	# Digital stage: 0 means muted on this codec, not merely quiet.
+	da0=$(cget 'AIF1 DA0 Playback Volume' | cut -d, -f1)
+	dac=$(cget 'DAC Playback Volume'      | cut -d, -f1)
+	[ -n "$da0" ] && [ "$da0" -gt 0 ] || return 1
+	[ -n "$dac" ] && [ "$dac" -gt 0 ] || return 1
+
+	# Analog stage: unmuted and above zero.
+	amixer -c $CARD sget Headphone 2>/dev/null | grep -m1 'Front Left:' | grep -q '\[on\]' || return 1
+	hp=$(amixer -c $CARD sget Headphone 2>/dev/null | grep -m1 'Front Left:' | sed 's/.*Playback \([0-9]*\).*/\1/')
+	[ -n "$hp" ] && [ "$hp" -gt 0 ]
+}
+
+apply_defaults() {
+	# Digital stages at unity: 160 of 192 == 0 dB on sun8i_codec_vol_scale.
+	# Anything above 160 is positive digital gain and clips, so never go there.
+	cset 'AIF1 DA0 Playback Volume' 160
+	cset 'DAC Playback Volume'      160
+
+	# Analog stage at maximum (63 of 63 == 0 dB on sun8i_codec_hp_vol_scale).
+	# This used to be `sset Headphone 80%`, which lands near -13 dB -- measured
+	# on hardware, that is too weak to drive the speaker amplifier through its
+	# 100 K series resistors and produces ticking rather than sound. The
+	# launcher sets its own level from /opt/roms/_system/state.txt once it
+	# starts; this is only the fallback for the window before that, and for a
+	# card with no saved state, so it errs loud rather than silent.
+	cset 'Headphone Playback Volume' 63
+	cset 'Headphone Playback Switch' on
+	amixer -c $CARD -q sset 'Headphone Source' 'DAC'     >/dev/null 2>&1
+	amixer -c $CARD -q sset 'AIF1 Slot 0 Digital DAC' on >/dev/null 2>&1
+}
+
+case "$1" in
+	start)
+		printf "Restoring ALSA mixer state: "
+		if [ -f /var/lib/alsa/asound.state ]; then
+			alsactl restore >/dev/null 2>&1
+		fi
+		if path_audible; then
+			echo "OK"
+		else
+			apply_defaults
+			if path_audible; then
+				echo "defaults applied"
+			else
+				echo "FAIL (playback path still muted)"
+			fi
+		fi
+		;;
+	stop)
+		# Persist runtime volume changes -- but never overwrite a good state
+		# file with a muted one, or a shutdown while muted poisons next boot.
+		if path_audible; then
+			alsactl store >/dev/null 2>&1
+		fi
+		;;
+	restart|reload)
+		"$0" start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+esac
+
+exit 0

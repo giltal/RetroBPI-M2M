@@ -1,0 +1,70 @@
+#!/bin/sh
+#
+# BOOT ORDER: this used to be S99 -- dead last, behind dbus, alsa, bluetoothd,
+# the network, wifi, crond and dropbear. None of those are needed to draw the
+# UI. The launcher's only real dependencies are /dev/dri and the input devices,
+# both of which exist once udev (S10) has settled, and S11modules only loads
+# brcmfmac (the display and GPU drivers are built in). Moving it to S12 puts
+# pixels on screen roughly a second earlier and lets everything else finish
+# behind it -- Bluetooth included, so a controller pairs a moment later than
+# the menu appears, which is the right way round.
+#
+# Start the RetroBPI launcher -- the device's UI.
+#
+# S99 so it runs last: it needs /opt/roms mounted (the FAT32 ROM partition) and
+# udev to have created /dev/dri/* and /dev/input/*. The launcher takes DRM master
+# on the KMS node, so the framebuffer console stops updating while it runs; the
+# serial console on ttyS0 is unaffected and remains available for debugging.
+#
+# NOT respawned on exit, deliberately. During bring-up a crash should hand the
+# display back rather than spin in a restart loop that hides the failure. For a
+# shipping device the respawn belongs in /etc/inittab:
+#     ::respawn:/usr/bin/retrobpi_launcher
+# which busybox init handles, including restart-on-crash.
+
+DAEMON="retrobpi_launcher"
+DAEMON_PATH="/usr/bin/$DAEMON"
+PIDFILE="/var/run/$DAEMON.pid"
+LOGFILE="/var/log/$DAEMON.log"
+
+start() {
+	[ -x "$DAEMON_PATH" ] || { echo "Launcher: $DAEMON_PATH missing"; return 1; }
+
+	printf "Starting %s: " "$DAEMON"
+	# Keep the log; it records which DRM node was chosen, whether a gamepad and
+	# touchscreen were found, and the startup time -- all worth having after a
+	# failed boot.
+	#
+	# The redirection must happen INSIDE the backgrounded process. busybox
+	# start-stop-daemon --background points the child's stdio at /dev/null,
+	# so redirecting the start-stop-daemon call itself captures nothing --
+	# which is exactly what happened the first time this script ran.
+	start-stop-daemon --start --background --make-pidfile --pidfile "$PIDFILE" \
+		--startas /bin/sh -- -c "exec '$DAEMON_PATH' >> '$LOGFILE' 2>&1"
+	status=$?
+	if [ "$status" -eq 0 ]; then echo "OK"; else echo "FAIL"; fi
+	return "$status"
+}
+
+stop() {
+	printf "Stopping %s: " "$DAEMON"
+	start-stop-daemon --stop --quiet --pidfile "$PIDFILE"
+	status=$?
+	rm -f "$PIDFILE"
+	if [ "$status" -eq 0 ]; then echo "OK"; else echo "FAIL"; fi
+	return "$status"
+}
+
+case "$1" in
+	start)
+		start;;
+	stop)
+		stop;;
+	restart|reload)
+		stop; sleep 1; start;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+esac
+
+exit $?

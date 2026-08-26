@@ -1,0 +1,89 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Banana Pi BPI-M2 Magic (A33) + EK79007 7" 1024x600 MIPI-DSI panel,
+ * connected through the bpi24-dsi-flex Rev F adapter.
+ *
+ * DRAFT — compiles, never booted. Pin assignments below are chosen from the
+ * 40-pin header table and MUST be verified against the R16/A33 manual and the
+ * board before wiring.
+ *
+ * The 24-way ribbon carries only DSI lanes, I2C, GND and 3V3. Panel reset,
+ * touch reset, touch interrupt and backlight enable are flying wires from the
+ * adapter board's J6 header to the 40-pin header:
+ *
+ *   J6 RESET_LCD -> CON1-P11  PH6
+ *   J6 RESET_TP  -> CON1-P16  PB2
+ *   J6 INT_TP    -> CON1-P13  PH7   (EINT-capable bank)
+ *   J6 LED_CTRL  -> CON1-P07  PH1   (also PWM1, for pwm-backlight later)
+ *
+ * Panel 3V3 comes from the cable's solder ear, fed from CON1-P01/P17.
+ * Panel 5V comes from the adapter board's own USB-C — see docs/strategy.md.
+ */
+
+#include "sun8i-r16-bananapi-m2m.dts"
+
+/ {
+	/*
+	 * Pin the MMC numbering. Without these, mmcblk indices are handed out in
+	 * probe-completion order, so the SD card lands on mmcblk0 or mmcblk2
+	 * depending on how the SDIO Wi-Fi race resolves that boot — and
+	 * root=/dev/mmcblkNp1 becomes a coin flip. Observed on hardware:
+	 * first boot took mmcblk0, every later boot took mmcblk2 and hung in
+	 * rootwait.
+	 */
+	aliases {
+		mmc0 = &mmc0;	/* 1c0f000 - SD card   */
+		mmc1 = &mmc1;	/* 1c10000 - SDIO WiFi */
+		mmc2 = &mmc2;	/* 1c11000 - eMMC (not populated) */
+	};
+
+	panel_backlight: panel-backlight {
+		compatible = "gpio-backlight";
+		gpios = <&pio 7 1 GPIO_ACTIVE_HIGH>;	/* PH1 - J6 LED_CTRL */
+		default-on;
+	};
+};
+
+&de {
+	status = "okay";
+};
+
+&tcon0 {
+	status = "okay";
+};
+
+&dphy {
+	status = "okay";
+};
+
+&dsi {
+	status = "okay";
+
+	panel@0 {
+		compatible = "fitipower,ek79007";
+		reg = <0>;
+		reset-gpios = <&pio 7 6 GPIO_ACTIVE_LOW>;	/* PH6 - J6 RESET_LCD */
+		backlight = <&panel_backlight>;
+	};
+};
+
+/*
+ * CN2-13 TP-SDA = PH3, CN2-14 TP-SCK = PH2 -> the ribbon's I2C pair.
+ * GT911 touch controller lives here.
+ *
+ * TODO: confirm PH2/PH3 is i2c0 and not another TWI instance.
+ */
+&i2c0 {
+	status = "okay";
+
+	touchscreen@5d {
+		compatible = "goodix,gt911";
+		reg = <0x5d>;
+		interrupt-parent = <&pio>;
+		interrupts = <7 7 IRQ_TYPE_EDGE_FALLING>;	/* PH7 */
+		irq-gpios = <&pio 7 7 GPIO_ACTIVE_HIGH>;	/* PH7 - J6 INT_TP  */
+		reset-gpios = <&pio 1 2 GPIO_ACTIVE_HIGH>;	/* PB2 - J6 RESET_TP */
+		touchscreen-size-x = <1024>;
+		touchscreen-size-y = <600>;
+	};
+};

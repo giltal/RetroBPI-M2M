@@ -1,0 +1,27 @@
+# ---------------------------------------------------------------------------
+# firmware/ is ALL build output, not source.
+#
+# It holds the sdcard image (2.6 GB), the ROM partition (2.0 GB), kernels,
+# DTBs, u-boot, the launcher binary, built cores, and several staging snapshots
+# (fix/ psx/ rot/ push/) taken while iterating against the board. Every one is
+# reproducible:
+#     scripts/rebuild_image.sh   -> sdcard.img, zImage, dtbs, u-boot
+#     scripts/stage-push.sh      -> the staging copies
+#
+# Git stores a full copy of every changed binary, so tracking these would add
+# gigabytes per rebuild. An earlier version of this file only excluded *.img
+# and *.vfat, which still let 31.6 MB of stale binaries into the first commit.
+# ---------------------------------------------------------------------------
+firmware/
+
+# ROM archives: large, regenerable, and not ours to distribute.
+backup/*.tar.gz
+
+# Scratch
+*.tmp
+*.orig
+*.rej
+
+# NOTE: buildroot-external/package/retroarch/retroarch/retro-assets IS tracked
+# deliberately -- retroarch.mk:45 copies it into the target, so it is a build
+# input, not an output.

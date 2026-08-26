@@ -1,0 +1,91 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * BPI-M2 Magic + Waveshare 5inch DSI LCD (B), 800x480, 1-lane MIPI DSI,
+ * connected through the Rev F "bpi24-dsi-flex" adapter
+ * (CN2 24-way 0.5 mm <-> RPi 15-way DSI 1.0 mm).
+ *
+ * DRAFT — not yet built or booted.
+ *
+ * WHAT THE CABLE CARRIES (Rev F netlist, build_flex.py):
+ *   CN2  1/2   D0_N/D0_P   ->  panel 8/9
+ *   CN2  3/4   D1_N/D1_P   ->  panel 2/3     (unused: this panel is 1-lane)
+ *   CN2  5/6   CK_N/CK_P   ->  panel 5/6
+ *   CN2 13/14  SDA/SCL     ->  panel 12/11
+ *   CN2 21/22  GND         ->  panel 1/4/7/10/13
+ *   panel 14/15 3V3        <-  external solder ear (NOT from CN2)
+ *
+ * WHAT THE CABLE DOES *NOT* CARRY — deliberately isolated:
+ *   CN2 15 TP-INT (PB5), 16 TP-RST (PB6), 17 LCD-BL-EN (PL4),
+ *   18 LCD-RST (PL5), 19 LCD-PWR-EN (PB7), 20 LCD-PWM (PH0),
+ *   7-10 D2/D3, 11/12 NC, 23/24 PS.
+ * This matches the RPi DSI connector, which has no pins for any of them:
+ * panel reset, bridge power and backlight all go through the 0x45 MCU, and
+ * there is no touch interrupt line at all -> touch MUST be polled.
+ *
+ * TODO before first boot:
+ *   - Confirm PH2/PH3 belong to i2c0 (TWI1 is PH4/PH5 per the 40-pin table,
+ *     so PH2/PH3 is most likely TWI0 — check the R16 manual pin-mux tables).
+ *   - Confirm the 0x45 MCU speaks the RPi ATTINY register map. If it does, the
+ *     stock rpi-panel-attiny-regulator below works as-is; if not, that node
+ *     needs a Waveshare variant driver (see Context.md).
+ *   - edt-ft5x06 needs the RPi polling patch backported — mainline requires an
+ *     IRQ and there is no IRQ on this cable.
+ *   - Real ws_800_480 porches from the Lyra DTS; values below are placeholders.
+ */
+
+#include "sun8i-r16-bananapi-m2m.dts"
+
+&de {
+	status = "okay";
+};
+
+&tcon0 {
+	status = "okay";
+};
+
+&dphy {
+	status = "okay";
+};
+
+&dsi {
+	status = "okay";
+
+	panel@0 {
+		compatible = "waveshare,5inch-dsi-lcd-b";
+		reg = <0>;
+
+		/* Everything below comes from the MCU on i2c0 @ 0x45, exactly as on
+		 * the RPi: the cable has no GPIO for any of it.
+		 */
+		power-supply = <&panel_mcu>;
+		backlight = <&panel_mcu>;
+		reset-gpios = <&panel_mcu 1 GPIO_ACTIVE_LOW>;
+	};
+};
+
+/*
+ * CN2-13 TP-SDA = PH3, CN2-14 TP-SCK = PH2.
+ * The panel MCU (0x45) and the touch controller (0x38) share this bus.
+ */
+&i2c0 {
+	status = "okay";
+
+	panel_mcu: regulator@45 {
+		compatible = "raspberrypi,7inch-touchscreen-panel-regulator";
+		reg = <0x45>;
+		gpio-controller;
+		#gpio-cells = <2>;
+	};
+
+	touchscreen@38 {
+		compatible = "edt,edt-ft5506";
+		reg = <0x38>;
+		/* No interrupt: the RPi DSI connector has no INT pin, so the Rev F
+		 * cable cannot carry one. Requires the polling patch.
+		 */
+		touchscreen-size-x = <800>;
+		touchscreen-size-y = <480>;
+		touchscreen-inverted-x;
+		touchscreen-inverted-y;
+	};
+};

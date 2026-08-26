@@ -1,0 +1,10 @@
+#
+# RetroBPI_M2M BR2_EXTERNAL package definitions.
+#
+# The retroarch tree (retroarch + ~60 libretro cores) was lifted from the
+# Luckfox Lyra SDK's Buildroot fork, because upstream Buildroot has no
+# retroarch or libretro packages at all.
+#
+source "$BR2_EXTERNAL_RETROBPI_PATH/package/retroarch/Config.in"
+source "$BR2_EXTERNAL_RETROBPI_PATH/package/retrobpi-launcher/Config.in"
+source "$BR2_EXTERNAL_RETROBPI_PATH/package/retrobpi-tools/Config.in"

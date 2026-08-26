@@ -1,0 +1,46 @@
+#!/bin/sh
+#
+# Bring up a network interface that has just appeared, and get it a lease.
+#
+# Called from udev (70-net-hotplug.rules) on SUBSYSTEM=="net", ACTION=="add".
+# Without this, swapping the USB-Ethernet adapter at runtime leaves eth0 up but
+# unconfigured -- nothing re-runs udhcpc -- and the board becomes reachable only
+# over the serial console. That failure mode cost real time during bring-up.
+#
+# Must return promptly: udev serialises RUN+= and will kill a slow rule, so the
+# actual DHCP work is backgrounded and this script exits immediately.
+
+IFACE="$1"
+[ -n "$IFACE" ] || exit 0
+
+# Only handle wired interfaces here. wlan0 needs wpa_supplicant first and is
+# owned by S49wifi; racing it from udev would produce two supplicants.
+case "$IFACE" in
+	eth*|usb*) ;;
+	*) exit 0 ;;
+esac
+
+PIDFILE=/var/run/udhcpc.$IFACE.pid
+
+(
+	# Give the adapter a moment to settle; the r8152 needs ~3 s from enumerate
+	# to carrier, and asking for a lease before then just burns a timeout.
+	i=0
+	while [ $i -lt 10 ]; do
+		[ "$(cat /sys/class/net/$IFACE/carrier 2>/dev/null)" = "1" ] && break
+		sleep 1
+		i=$((i + 1))
+	done
+
+	ip link set "$IFACE" up 2>/dev/null
+
+	# Replace any stale client for this interface rather than stacking them up.
+	if [ -f "$PIDFILE" ]; then
+		kill "$(cat $PIDFILE)" 2>/dev/null
+		rm -f "$PIDFILE"
+	fi
+
+	/sbin/udhcpc -b -i "$IFACE" -t 5 -T 2 -S -p "$PIDFILE" >/dev/null 2>&1
+) &
+
+exit 0

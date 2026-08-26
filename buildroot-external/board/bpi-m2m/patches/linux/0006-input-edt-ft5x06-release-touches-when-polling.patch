@@ -1,0 +1,59 @@
+input: edt-ft5x06: release touches when polling
+
+The controller reports Reserved rather than TOUCH_EVENT_UP for a lifted
+finger. With an interrupt that is fine, but when polling the slot is never
+closed, so BTN_TOUCH latches at 1 and userspace never sees a press again.
+
+Signed-off-by: RetroBPI_M2M
+
+--- a/drivers/input/touchscreen/edt-ft5x06.c
++++ b/drivers/input/touchscreen/edt-ft5x06.c
+@@ -307,6 +307,7 @@
+ 	struct device *dev = &tsdata->client->dev;
+ 	u8 rdbuf[63];
+ 	int i, type, x, y, id;
++	unsigned long seen = 0;
+ 	int error;
+ 
+ 	memset(rdbuf, 0, sizeof(rdbuf));
+@@ -338,6 +339,7 @@
+ 
+ 		id = (buf[2] >> 4) & 0x0f;
+ 
++		seen |= 1UL << id;
+ 		input_mt_slot(tsdata->input, id);
+ 		if (input_mt_report_slot_state(tsdata->input, MT_TOOL_FINGER,
+ 					       type != TOUCH_EVENT_UP))
+@@ -345,6 +347,32 @@
+ 					       x, y, true);
+ 	}
+ 
++
++	/*
++	 * Close slots the controller stopped reporting.
++	 *
++	 * When a finger lifts, this controller does not report TOUCH_EVENT_UP for
++	 * the vacated point -- it reports Reserved, which the loop above skips. In
++	 * IRQ mode that is harmless: the controller only interrupts when there is
++	 * something to say, so an UP arrives as its own event. Polling has no such
++	 * guarantee. We run every EDT_FT5X06_POLL_INTERVAL_MS regardless, see
++	 * Reserved for the lifted finger, skip it, and leave the slot open forever.
++	 *
++	 * The visible result is that ABS_MT_TRACKING_ID never returns to -1 and
++	 * BTN_TOUCH never returns to 0. Because input_event() suppresses repeated
++	 * values, BTN_TOUCH is then emitted exactly once -- on the first touch
++	 * after boot -- and never again, so userspace sees coordinates streaming
++	 * but no press or release. Every touch-driven UI appears completely dead.
++	 */
++	if (tsdata->client->irq <= 0) {
++		for (i = 0; i < tsdata->max_support_points; i++) {
++			if (seen & (1UL << i))
++				continue;
++			input_mt_slot(tsdata->input, i);
++			input_mt_report_slot_inactive(tsdata->input);
++		}
++	}
++
+ 	input_mt_report_pointer_emulation(tsdata->input, true);
+ 	input_sync(tsdata->input);
+ 

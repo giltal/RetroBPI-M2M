@@ -1,0 +1,390 @@
+Add BPI-M2 Magic device trees: ek79007, ws5b and probe
+
+Signed-off-by: RetroBPI_M2M
+
+--- /dev/null
++++ b/arch/arm/boot/dts/allwinner/sun8i-a33-bananapi-m2m-ek79007.dts
+@@ -0,0 +1,89 @@
++// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
++/*
++ * Banana Pi BPI-M2 Magic (A33) + EK79007 7" 1024x600 MIPI-DSI panel,
++ * connected through the bpi24-dsi-flex Rev F adapter.
++ *
++ * DRAFT — compiles, never booted. Pin assignments below are chosen from the
++ * 40-pin header table and MUST be verified against the R16/A33 manual and the
++ * board before wiring.
++ *
++ * The 24-way ribbon carries only DSI lanes, I2C, GND and 3V3. Panel reset,
++ * touch reset, touch interrupt and backlight enable are flying wires from the
++ * adapter board's J6 header to the 40-pin header:
++ *
++ *   J6 RESET_LCD -> CON1-P11  PH6
++ *   J6 RESET_TP  -> CON1-P16  PB2
++ *   J6 INT_TP    -> CON1-P13  PH7   (EINT-capable bank)
++ *   J6 LED_CTRL  -> CON1-P07  PH1   (also PWM1, for pwm-backlight later)
++ *
++ * Panel 3V3 comes from the cable's solder ear, fed from CON1-P01/P17.
++ * Panel 5V comes from the adapter board's own USB-C — see docs/strategy.md.
++ */
++
++#include "sun8i-r16-bananapi-m2m.dts"
++
++/ {
++	/*
++	 * Pin the MMC numbering. Without these, mmcblk indices are handed out in
++	 * probe-completion order, so the SD card lands on mmcblk0 or mmcblk2
++	 * depending on how the SDIO Wi-Fi race resolves that boot — and
++	 * root=/dev/mmcblkNp1 becomes a coin flip. Observed on hardware:
++	 * first boot took mmcblk0, every later boot took mmcblk2 and hung in
++	 * rootwait.
++	 */
++	aliases {
++		mmc0 = &mmc0;	/* 1c0f000 - SD card   */
++		mmc1 = &mmc1;	/* 1c10000 - SDIO WiFi */
++		mmc2 = &mmc2;	/* 1c11000 - eMMC (not populated) */
++	};
++
++	panel_backlight: panel-backlight {
++		compatible = "gpio-backlight";
++		gpios = <&pio 7 1 GPIO_ACTIVE_HIGH>;	/* PH1 - J6 LED_CTRL */
++		default-on;
++	};
++};
++
++&de {
++	status = "okay";
++};
++
++&tcon0 {
++	status = "okay";
++};
++
++&dphy {
++	status = "okay";
++};
++
++&dsi {
++	status = "okay";
++
++	panel@0 {
++		compatible = "fitipower,ek79007";
++		reg = <0>;
++		reset-gpios = <&pio 7 6 GPIO_ACTIVE_LOW>;	/* PH6 - J6 RESET_LCD */
++		backlight = <&panel_backlight>;
++	};
++};
++
++/*
++ * CN2-13 TP-SDA = PH3, CN2-14 TP-SCK = PH2 -> the ribbon's I2C pair.
++ * GT911 touch controller lives here.
++ *
++ * TODO: confirm PH2/PH3 is i2c0 and not another TWI instance.
++ */
++&i2c0 {
++	status = "okay";
++
++	touchscreen@5d {
++		compatible = "goodix,gt911";
++		reg = <0x5d>;
++		interrupt-parent = <&pio>;
++		interrupts = <7 7 IRQ_TYPE_EDGE_FALLING>;	/* PH7 */
++		irq-gpios = <&pio 7 7 GPIO_ACTIVE_HIGH>;	/* PH7 - J6 INT_TP  */
++		reset-gpios = <&pio 1 2 GPIO_ACTIVE_HIGH>;	/* PB2 - J6 RESET_TP */
++		touchscreen-size-x = <1024>;
++		touchscreen-size-y = <600>;
++	};
++};
+--- /dev/null
++++ b/arch/arm/boot/dts/allwinner/sun8i-a33-bananapi-m2m-ws5b.dts
+@@ -0,0 +1,201 @@
++// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
++/*
++ * Banana Pi BPI-M2 Magic (A33) + Waveshare 5inch DSI LCD (B), 800x480,
++ * through the bpi24-dsi-flex Rev F adapter.
++ *
++ * Everything the panel needs arrives over the ribbon - DSI lanes, the I2C pair
++ * and 3V3 at the solder ear. There are NO flying wires for this panel: panel
++ * reset, touch reset and backlight are all owned by the MCU at 0x45, exactly
++ * as on a Raspberry Pi.
++ *
++ * Confirmed on hardware: 0x45 answers 0xc3 at REG_ID, i.e. the genuine RPi
++ * ATTINY register map, so mainline's rpi-panel-attiny-regulator drives it
++ * unmodified. Touch answers at 0x38 (FT5x06).
++ */
++
++#include "sun8i-r16-bananapi-m2m.dts"
++
++/ {
++	/*
++	 * Pin MMC numbering - without this the SD card lands on mmcblk0 or
++	 * mmcblk2 depending on how the SDIO Wi-Fi probe race resolves, and
++	 * root=/dev/mmcblk0p1 hangs in rootwait. Seen on hardware.
++	 */
++	aliases {
++		mmc0 = &mmc0;	/* 1c0f000 - SD card   */
++		mmc1 = &mmc1;	/* 1c10000 - SDIO WiFi */
++		mmc2 = &mmc2;	/* 1c11000 - eMMC (not populated) */
++	};
++
++	/*
++	 * Onboard speaker amplifier (SN2010BIF09E, mono class-D) on the speaker
++	 * breakout. It is fed from the codec's HPL/HPR through C102/C104 and
++	 * 100 K resistors -- i.e. from the headphone outputs, not a line out --
++	 * and drives the 2-pin SPK2 header.
++	 *
++	 * Its SDB (shutdown) pin is the PA-SHDN net, which the main board
++	 * schematic puts on ball E14 = PH9. R107 pulls SDB to GROUND with 100 K,
++	 * so the amp is held shut down until something actively drives PA-SHDN
++	 * high -- hence GPIO_ACTIVE_HIGH.
++	 *
++	 * Wiring it as a DAPM aux device rather than a plain always-on GPIO means
++	 * the amp powers up only while a stream is actually running, which keeps
++	 * it from sitting there amplifying idle noise and avoids a permanent
++	 * current draw on a battery-powered handheld.
++	 */
++	speaker_amp: audio-amplifier {
++		compatible = "simple-audio-amplifier";
++		enable-gpios = <&pio 7 9 GPIO_ACTIVE_HIGH>; /* PH9 = PA-SHDN */
++		sound-name-prefix = "Speaker Amp";
++	};
++};
++
++&de {
++	status = "okay";
++};
++
++&tcon0 {
++	status = "okay";
++};
++
++&dphy {
++	status = "okay";
++};
++
++&dsi {
++	status = "okay";
++
++	panel@0 {
++		compatible = "waveshare,5inch-dsi-lcd-b";
++		reg = <0>;
++
++		/* All three come from the 0x45 MCU below. */
++		power-supply = <&panel_mcu>;
++		backlight = <&panel_mcu>;
++		reset-gpios = <&panel_mcu 1 GPIO_ACTIVE_HIGH>;
++
++		/*
++		 * The panel is physically mounted upside down in the case.
++		 *
++		 * This property is the canonical statement of that fact. It does
++		 * NOT rotate anything by itself -- the kernel only exposes it as
++		 * a "panel orientation" hint on the connector, and sun4i-drm has
++		 * no hardware rotation to apply. Each consumer compensates:
++		 *
++		 *   RetroArch  video_rotation = "2"   (free; GL projection matrix)
++		 *   launcher   PANEL_ROTATION=180     (build-time, rotates its blit)
++		 *   touch      UNVERIFIED - see the note on the touchscreen node
++		 *
++		 * If the panel is ever mounted the right way up, this is the line
++		 * to change first, then follow the three references above.
++		 */
++		rotation = <180>;
++	};
++};
++
++/*
++ * CN2-13 TP-SDA = PH3, CN2-14 TP-SCK = PH2 - the ribbon's I2C pair.
++ * The panel MCU and the touch controller share it.
++ */
++&i2c0 {
++	status = "okay";
++
++	panel_mcu: regulator@45 {
++		compatible = "raspberrypi,7inch-touchscreen-panel-regulator";
++		reg = <0x45>;
++		gpio-controller;
++		#gpio-cells = <2>;
++	};
++
++	touchscreen@38 {
++		compatible = "edt,edt-ft5506";
++		reg = <0x38>;
++		/*
++		 * No interrupt: the RPi DSI connector has no INT pin, so the
++		 * Rev F cable cannot carry one and mainline's edt-ft5x06 -
++		 * which calls devm_request_threaded_irq() unconditionally -
++		 * will not probe. Needs the RPi polling patch backported
++		 * before touch works. See docs/cable_bringup_test.md.
++		 */
++		touchscreen-size-x = <800>;
++		touchscreen-size-y = <480>;
++		/*
++		 * NO axis inversion.
++		 *
++		 * `touchscreen-inverted-x` and `touchscreen-inverted-y` were both
++		 * set here from the initial port, untested. With the display now
++		 * rotated 180 in software (see rotation = <180> above) they made
++		 * touch land 180 degrees out -- reported on hardware as "touch is
++		 * not working", because pressing a key on the search keyboard
++		 * activated the diagonally opposite point, usually empty space.
++		 *
++		 * Inverting both axes IS a 180 degree rotation, so with the
++		 * display already rotated they were applying it a second time.
++		 * Removed as a pair: removing one alone gives a mirror, which is
++		 * harder to diagnose than a clean 180.
++		 */
++	};
++};
++
++/*
++ * Route the codec's headphone output into the speaker amplifier.
++ *
++ * sun8i-a33.dtsi already defines this card with aux-devs = <&codec_analog> and
++ * the two DAC routes. Overriding a property REPLACES it, so both of those have
++ * to be restated here alongside the additions -- dropping codec_analog would
++ * take the whole analog path with it.
++ *
++ * The A33 analog codec exposes a single "HP" output widget (not HPL/HPR), so
++ * both amplifier inputs are fed from it; the amp is mono anyway. Routing from
++ * a codec OUTPUT widget into an amplifier INPUT widget is the established
++ * pattern for this driver -- see arch/arm/boot/dts/ti/omap/omap3-echo.dts.
++ *
++ * Consequence worth knowing: there is no headphone jack detect on this board,
++ * so the amp is enabled whenever playback runs, headphones plugged in or not.
++ * Muting the speaker when headphones are inserted would need a detect line the
++ * hardware does not bring out.
++ */
++&sound {
++	simple-audio-card,aux-devs = <&codec_analog>, <&speaker_amp>;
++	simple-audio-card,widgets = "Speaker", "Speaker";
++	simple-audio-card,routing =
++		"Left DAC", "DACL",
++		"Right DAC", "DACR",
++		"Speaker Amp INL", "HP",
++		"Speaker Amp INR", "HP",
++		"Speaker", "Speaker Amp OUTL",
++		"Speaker", "Speaker Amp OUTR";
++};
++
++/*
++ * Give the Bluetooth controller a real address.
++ *
++ * The base DTS declares the BCM43430A1 as a serdev child of uart1. Because
++ * CONFIG_BT_HCIUART is built in, the driver binds at ~2.3 s -- before the
++ * rootfs is mounted -- so brcm/BCM43430A1.hcd cannot be loaded and the chip
++ * runs on its ROM firmware. That works, but it reports the unprogrammed
++ * default address AA:AA:AA:AA:AA:AA.
++ *
++ * A stable, real address matters here specifically because of the DualShock 3:
++ * BlueZ's sixaxis plugin writes the HOST's address into the pad over USB, and
++ * the pad will only ever connect back to that address. A default shared by
++ * every unpatched BCM part -- or one that changes -- breaks pairing.
++ *
++ * Byte order is little-endian per the bluetooth-controller binding, so this
++ * shows up as 02:00:00:42:50:49. 0x02 in the leading (displayed) octet marks
++ * it locally administered, so it cannot collide with a real assignment.
++ *
++ * PRODUCT NOTE: this is a fixed address baked into the image, so every board
++ * built from it is identical. Fine for one bench unit; before shipping, derive
++ * it from the SoC serial (/sys/bus/soc/devices/soc0/serial_number) and set it
++ * at runtime, or two devices in the same room will conflict.
++ *
++ * The alternative -- loading the patchram by making BT_HCIUART a module -- was
++ * tried in build #25 and left the chip unresponsive after the patch
++ * ("command 0x0c03 tx timeout", "BCM: Reset failed (-110)"), reproducibly.
++ */
++&uart1 {
++	bluetooth {
++		local-bd-address = [49 50 42 00 00 02];
++	};
++};
+--- /dev/null
++++ b/arch/arm/boot/dts/allwinner/sun8i-a33-bananapi-m2m-probe.dts
+@@ -0,0 +1,34 @@
++// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
++/*
++ * BPI-M2 Magic - panel identification / bring-up device tree.
++ *
++ * Deliberately does NOT enable the display pipeline or declare a panel. Its
++ * only job is to bring up the ribbon's I2C bus so an unknown DSI panel can be
++ * identified with `i2cdetect -y 0` without risking the DRM wedge:
++ *
++ *   attaching a panel driver whose controller is not actually present ends in
++ *   sun6i_dsi_attach -> fbcon -> drm_atomic_helper_wait_for_vblanks, which
++ *   times out forever and blocks the console. Observed on hardware.
++ *
++ * Expected results on the ribbon's bus:
++ *   0x45 + 0x38  -> TC358762 bridge + MCU family (Waveshare 5" DSI LCD (B))
++ *   0x45 + 0x14  -> same family, GT911 touch instead
++ *   0x5d / 0x14  -> Goodix GT911
++ *   nothing      -> panel unpowered, or the ribbon's I2C pair is open
++ */
++
++#include "sun8i-r16-bananapi-m2m.dts"
++
++/ {
++	/* See the ek79007 DTS for why these are needed. */
++	aliases {
++		mmc0 = &mmc0;	/* 1c0f000 - SD card   */
++		mmc1 = &mmc1;	/* 1c10000 - SDIO WiFi */
++		mmc2 = &mmc2;	/* 1c11000 - eMMC (not populated) */
++	};
++};
++
++/* CN2-13 TP-SDA = PH3, CN2-14 TP-SCK = PH2 - the pair the ribbon carries. */
++&i2c0 {
++	status = "okay";
++};
+--- /dev/null
++++ b/arch/arm/boot/dts/allwinner/sun8i-a33-bananapi-m2m-ws5b-nousb.dts
+@@ -0,0 +1,37 @@
++// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
++/*
++ * ws5b device tree with USB disabled - a DIAGNOSTIC build, not a product one.
++ *
++ * The board resets hard, mid-printk with no panic, consistently at USB
++ * bring-up, but ONLY when the DSI is driving a connected panel:
++ *
++ *   panel off cable + DSI active   -> stable
++ *   panel on cable  + DSI inactive -> stable
++ *   panel on cable  + DSI active   -> reset at ohci/ehci probe
++ *
++ * Both consumers sit on the same AXP223 rail. VCC-DSI is DCDC1, shared with
++ * VCC-3V0 (the SoC I/O rail), and the USB host VBUS is made by the U3 boost
++ * which also runs off VCC-3V0. So the hypothesis is that the DSI PHY driving a
++ * real load plus the USB boost starting exceeds what DCDC1 will give, and the
++ * PMIC cuts it - which is why no external supply has helped.
++ *
++ * If this DTB is stable with the panel connected and lit, that confirms it.
++ */
++
++#include "sun8i-a33-bananapi-m2m-ws5b.dts"
++
++&usbphy {
++	status = "disabled";
++};
++
++&ehci0 {
++	status = "disabled";
++};
++
++&ohci0 {
++	status = "disabled";
++};
++
++&usb_otg {
++	status = "disabled";
++};
+--- a/arch/arm/boot/dts/allwinner/Makefile
++++ b/arch/arm/boot/dts/allwinner/Makefile
+@@ -251,6 +251,10 @@
+ 	sun8i-h3-rervision-dvk.dtb \
+ 	sun8i-h3-zeropi.dtb \
+ 	sun8i-h3-emlid-neutis-n5h3-devboard.dtb \
++	sun8i-a33-bananapi-m2m-ek79007.dtb \
++	sun8i-a33-bananapi-m2m-ws5b.dtb \
++	sun8i-a33-bananapi-m2m-ws5b-nousb.dtb \
++	sun8i-a33-bananapi-m2m-probe.dtb \
+ 	sun8i-r16-bananapi-m2m.dtb \
+ 	sun8i-r16-nintendo-nes-classic.dtb \
+ 	sun8i-r16-nintendo-super-nes-classic.dtb \

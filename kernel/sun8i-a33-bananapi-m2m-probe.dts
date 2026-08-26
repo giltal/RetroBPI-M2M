@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * BPI-M2 Magic - panel identification / bring-up device tree.
+ *
+ * Deliberately does NOT enable the display pipeline or declare a panel. Its
+ * only job is to bring up the ribbon's I2C bus so an unknown DSI panel can be
+ * identified with `i2cdetect -y 0` without risking the DRM wedge:
+ *
+ *   attaching a panel driver whose controller is not actually present ends in
+ *   sun6i_dsi_attach -> fbcon -> drm_atomic_helper_wait_for_vblanks, which
+ *   times out forever and blocks the console. Observed on hardware.
+ *
+ * Expected results on the ribbon's bus:
+ *   0x45 + 0x38  -> TC358762 bridge + MCU family (Waveshare 5" DSI LCD (B))
+ *   0x45 + 0x14  -> same family, GT911 touch instead
+ *   0x5d / 0x14  -> Goodix GT911
+ *   nothing      -> panel unpowered, or the ribbon's I2C pair is open
+ */
+
+#include "sun8i-r16-bananapi-m2m.dts"
+
+/ {
+	/* See the ek79007 DTS for why these are needed. */
+	aliases {
+		mmc0 = &mmc0;	/* 1c0f000 - SD card   */
+		mmc1 = &mmc1;	/* 1c10000 - SDIO WiFi */
+		mmc2 = &mmc2;	/* 1c11000 - eMMC (not populated) */
+	};
+};
+
+/* CN2-13 TP-SDA = PH3, CN2-14 TP-SCK = PH2 - the pair the ribbon carries. */
+&i2c0 {
+	status = "okay";
+};

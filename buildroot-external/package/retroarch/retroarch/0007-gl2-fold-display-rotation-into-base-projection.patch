@@ -1,0 +1,50 @@
+gl2: fold a fixed display rotation into the base projection
+
+video_rotation is a content rotation and is applied to mvp only; the menu
+and OSD draw with mvp_no_rot by design. On a board whose panel is mounted
+upside down that leaves the menu inverted. screen_orientation would be the
+right knob but the KMS context does not implement it.
+
+Signed-off-by: RetroBPI_M2M
+
+--- a/gfx/drivers/gl2.c
++++ b/gfx/drivers/gl2.c
+@@ -1251,6 +1251,38 @@
+    matrix_4x4_ortho(gl->mvp_no_rot, ortho->left, ortho->right,
+          ortho->bottom, ortho->top, ortho->znear, ortho->zfar);
+ 
++#if defined(RETROBPI_DISPLAY_ROTATION) && RETROBPI_DISPLAY_ROTATION != 0
++   /*
++    * Fold a fixed DISPLAY rotation into the base projection.
++    *
++    * The panel on this board is mounted upside down. RetroArch's own
++    * video_rotation is a CONTENT rotation: it is applied to gl->mvp only,
++    * while the menu, OSD and every gfx_display widget deliberately draw with
++    * gl->mvp_no_rot so they stay screen-upright when a vertical arcade game
++    * rotates. Correct in general -- wrong when the whole panel is upside
++    * down, which showed up as the game rotating but the RGUI menu and
++    * on-screen messages staying inverted.
++    *
++    * screen_orientation is the setting that would normally cover this, but
++    * the KMS context does not implement set_screen_orientation (it is NULL
++    * in video_driver.c), so it is a no-op here.
++    *
++    * Rotating mvp_no_rot itself means everything inherits it, and the core
++    * rotation still composes on top for vertical games.
++    */
++   {
++      math_matrix_4x4 disp, tmp;
++      float drad = M_PI * (RETROBPI_DISPLAY_ROTATION) / 180.0f;
++      matrix_4x4_identity(disp);
++      MAT_ELEM_4X4(disp, 0, 0) =  cosf(drad);
++      MAT_ELEM_4X4(disp, 0, 1) = -sinf(drad);
++      MAT_ELEM_4X4(disp, 1, 0) =  sinf(drad);
++      MAT_ELEM_4X4(disp, 1, 1) =  cosf(drad);
++      matrix_4x4_multiply(tmp, disp, gl->mvp_no_rot);
++      gl->mvp_no_rot = tmp;
++   }
++#endif
++
+    if (!allow_rotate)
+    {
+       gl->mvp = gl->mvp_no_rot;

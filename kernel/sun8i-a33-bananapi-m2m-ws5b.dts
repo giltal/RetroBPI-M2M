@@ -1,0 +1,201 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Banana Pi BPI-M2 Magic (A33) + Waveshare 5inch DSI LCD (B), 800x480,
+ * through the bpi24-dsi-flex Rev F adapter.
+ *
+ * Everything the panel needs arrives over the ribbon - DSI lanes, the I2C pair
+ * and 3V3 at the solder ear. There are NO flying wires for this panel: panel
+ * reset, touch reset and backlight are all owned by the MCU at 0x45, exactly
+ * as on a Raspberry Pi.
+ *
+ * Confirmed on hardware: 0x45 answers 0xc3 at REG_ID, i.e. the genuine RPi
+ * ATTINY register map, so mainline's rpi-panel-attiny-regulator drives it
+ * unmodified. Touch answers at 0x38 (FT5x06).
+ */
+
+#include "sun8i-r16-bananapi-m2m.dts"
+
+/ {
+	/*
+	 * Pin MMC numbering - without this the SD card lands on mmcblk0 or
+	 * mmcblk2 depending on how the SDIO Wi-Fi probe race resolves, and
+	 * root=/dev/mmcblk0p1 hangs in rootwait. Seen on hardware.
+	 */
+	aliases {
+		mmc0 = &mmc0;	/* 1c0f000 - SD card   */
+		mmc1 = &mmc1;	/* 1c10000 - SDIO WiFi */
+		mmc2 = &mmc2;	/* 1c11000 - eMMC (not populated) */
+	};
+
+	/*
+	 * Onboard speaker amplifier (SN2010BIF09E, mono class-D) on the speaker
+	 * breakout. It is fed from the codec's HPL/HPR through C102/C104 and
+	 * 100 K resistors -- i.e. from the headphone outputs, not a line out --
+	 * and drives the 2-pin SPK2 header.
+	 *
+	 * Its SDB (shutdown) pin is the PA-SHDN net, which the main board
+	 * schematic puts on ball E14 = PH9. R107 pulls SDB to GROUND with 100 K,
+	 * so the amp is held shut down until something actively drives PA-SHDN
+	 * high -- hence GPIO_ACTIVE_HIGH.
+	 *
+	 * Wiring it as a DAPM aux device rather than a plain always-on GPIO means
+	 * the amp powers up only while a stream is actually running, which keeps
+	 * it from sitting there amplifying idle noise and avoids a permanent
+	 * current draw on a battery-powered handheld.
+	 */
+	speaker_amp: audio-amplifier {
+		compatible = "simple-audio-amplifier";
+		enable-gpios = <&pio 7 9 GPIO_ACTIVE_HIGH>; /* PH9 = PA-SHDN */
+		sound-name-prefix = "Speaker Amp";
+	};
+};
+
+&de {
+	status = "okay";
+};
+
+&tcon0 {
+	status = "okay";
+};
+
+&dphy {
+	status = "okay";
+};
+
+&dsi {
+	status = "okay";
+
+	panel@0 {
+		compatible = "waveshare,5inch-dsi-lcd-b";
+		reg = <0>;
+
+		/* All three come from the 0x45 MCU below. */
+		power-supply = <&panel_mcu>;
+		backlight = <&panel_mcu>;
+		reset-gpios = <&panel_mcu 1 GPIO_ACTIVE_HIGH>;
+
+		/*
+		 * The panel is physically mounted upside down in the case.
+		 *
+		 * This property is the canonical statement of that fact. It does
+		 * NOT rotate anything by itself -- the kernel only exposes it as
+		 * a "panel orientation" hint on the connector, and sun4i-drm has
+		 * no hardware rotation to apply. Each consumer compensates:
+		 *
+		 *   RetroArch  video_rotation = "2"   (free; GL projection matrix)
+		 *   launcher   PANEL_ROTATION=180     (build-time, rotates its blit)
+		 *   touch      UNVERIFIED - see the note on the touchscreen node
+		 *
+		 * If the panel is ever mounted the right way up, this is the line
+		 * to change first, then follow the three references above.
+		 */
+		rotation = <180>;
+	};
+};
+
+/*
+ * CN2-13 TP-SDA = PH3, CN2-14 TP-SCK = PH2 - the ribbon's I2C pair.
+ * The panel MCU and the touch controller share it.
+ */
+&i2c0 {
+	status = "okay";
+
+	panel_mcu: regulator@45 {
+		compatible = "raspberrypi,7inch-touchscreen-panel-regulator";
+		reg = <0x45>;
+		gpio-controller;
+		#gpio-cells = <2>;
+	};
+
+	touchscreen@38 {
+		compatible = "edt,edt-ft5506";
+		reg = <0x38>;
+		/*
+		 * No interrupt: the RPi DSI connector has no INT pin, so the
+		 * Rev F cable cannot carry one and mainline's edt-ft5x06 -
+		 * which calls devm_request_threaded_irq() unconditionally -
+		 * will not probe. Needs the RPi polling patch backported
+		 * before touch works. See docs/cable_bringup_test.md.
+		 */
+		touchscreen-size-x = <800>;
+		touchscreen-size-y = <480>;
+		/*
+		 * NO axis inversion.
+		 *
+		 * `touchscreen-inverted-x` and `touchscreen-inverted-y` were both
+		 * set here from the initial port, untested. With the display now
+		 * rotated 180 in software (see rotation = <180> above) they made
+		 * touch land 180 degrees out -- reported on hardware as "touch is
+		 * not working", because pressing a key on the search keyboard
+		 * activated the diagonally opposite point, usually empty space.
+		 *
+		 * Inverting both axes IS a 180 degree rotation, so with the
+		 * display already rotated they were applying it a second time.
+		 * Removed as a pair: removing one alone gives a mirror, which is
+		 * harder to diagnose than a clean 180.
+		 */
+	};
+};
+
+/*
+ * Route the codec's headphone output into the speaker amplifier.
+ *
+ * sun8i-a33.dtsi already defines this card with aux-devs = <&codec_analog> and
+ * the two DAC routes. Overriding a property REPLACES it, so both of those have
+ * to be restated here alongside the additions -- dropping codec_analog would
+ * take the whole analog path with it.
+ *
+ * The A33 analog codec exposes a single "HP" output widget (not HPL/HPR), so
+ * both amplifier inputs are fed from it; the amp is mono anyway. Routing from
+ * a codec OUTPUT widget into an amplifier INPUT widget is the established
+ * pattern for this driver -- see arch/arm/boot/dts/ti/omap/omap3-echo.dts.
+ *
+ * Consequence worth knowing: there is no headphone jack detect on this board,
+ * so the amp is enabled whenever playback runs, headphones plugged in or not.
+ * Muting the speaker when headphones are inserted would need a detect line the
+ * hardware does not bring out.
+ */
+&sound {
+	simple-audio-card,aux-devs = <&codec_analog>, <&speaker_amp>;
+	simple-audio-card,widgets = "Speaker", "Speaker";
+	simple-audio-card,routing =
+		"Left DAC", "DACL",
+		"Right DAC", "DACR",
+		"Speaker Amp INL", "HP",
+		"Speaker Amp INR", "HP",
+		"Speaker", "Speaker Amp OUTL",
+		"Speaker", "Speaker Amp OUTR";
+};
+
+/*
+ * Give the Bluetooth controller a real address.
+ *
+ * The base DTS declares the BCM43430A1 as a serdev child of uart1. Because
+ * CONFIG_BT_HCIUART is built in, the driver binds at ~2.3 s -- before the
+ * rootfs is mounted -- so brcm/BCM43430A1.hcd cannot be loaded and the chip
+ * runs on its ROM firmware. That works, but it reports the unprogrammed
+ * default address AA:AA:AA:AA:AA:AA.
+ *
+ * A stable, real address matters here specifically because of the DualShock 3:
+ * BlueZ's sixaxis plugin writes the HOST's address into the pad over USB, and
+ * the pad will only ever connect back to that address. A default shared by
+ * every unpatched BCM part -- or one that changes -- breaks pairing.
+ *
+ * Byte order is little-endian per the bluetooth-controller binding, so this
+ * shows up as 02:00:00:42:50:49. 0x02 in the leading (displayed) octet marks
+ * it locally administered, so it cannot collide with a real assignment.
+ *
+ * PRODUCT NOTE: this is a fixed address baked into the image, so every board
+ * built from it is identical. Fine for one bench unit; before shipping, derive
+ * it from the SoC serial (/sys/bus/soc/devices/soc0/serial_number) and set it
+ * at runtime, or two devices in the same room will conflict.
+ *
+ * The alternative -- loading the patchram by making BT_HCIUART a module -- was
+ * tried in build #25 and left the chip unresponsive after the patch
+ * ("command 0x0c03 tx timeout", "BCM: Reset failed (-110)"), reproducibly.
+ */
+&uart1 {
+	bluetooth {
+		local-bd-address = [49 50 42 00 00 02];
+	};
+};

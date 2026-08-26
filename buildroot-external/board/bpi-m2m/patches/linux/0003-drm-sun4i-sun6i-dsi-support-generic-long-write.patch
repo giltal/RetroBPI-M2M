@@ -1,0 +1,49 @@
+drm/sun4i: sun6i_mipi_dsi: support MIPI_DSI_GENERIC_LONG_WRITE
+
+sun6i_dsi_transfer() accepts DCS short/long writes, generic *short* writes
+and DCS reads, and returns -EINVAL for anything else. MIPI_DSI_GENERIC_LONG_WRITE
+is therefore rejected outright:
+
+  panel-waveshare-dsi-b 1ca0000.dsi.0: sending generic data 10 02 03 00 00 00 failed: -22
+
+That packet type is how the Toshiba TC358762 DSI-to-DPI bridge is configured -
+mainline's own drivers/gpu/drm/bridge/tc358762.c writes every one of its
+registers with mipi_dsi_generic_write() - so no TC358762-based panel can be
+driven from an Allwinner DSI host. This includes the Raspberry Pi 7"
+touchscreen and its many clones.
+
+Two changes are needed:
+
+ - route MIPI_DSI_GENERIC_LONG_WRITE to sun6i_dsi_dcs_write_long(), which is
+   already packet-type agnostic apart from the header;
+
+ - sun6i_dsi_dcs_build_pkt_hdr() only encodes a word count for
+   MIPI_DSI_DCS_LONG_WRITE, and treats everything else as a short packet by
+   stuffing the first payload bytes into the header. Generic long writes need
+   the same word-count encoding.
+
+Tested on a BananaPi M2 Magic (A33) driving a Waveshare 5inch DSI LCD (B),
+which is a TC358762 + RPi-compatible ATTINY design.
+
+Signed-off-by: RetroBPI_M2M
+
+--- a/drivers/gpu/drm/sun4i/sun6i_mipi_dsi.c
++++ b/drivers/gpu/drm/sun4i/sun6i_mipi_dsi.c
+@@ -852,7 +852,8 @@ static u32 sun6i_dsi_dcs_build_pkt_hdr(struct sun6i_dsi *dsi,
+ {
+ 	u32 pkt = msg->type;
+
+-	if (msg->type == MIPI_DSI_DCS_LONG_WRITE) {
++	if (msg->type == MIPI_DSI_DCS_LONG_WRITE ||
++	    msg->type == MIPI_DSI_GENERIC_LONG_WRITE) {
+ 		pkt |= ((msg->tx_len) & 0xffff) << 8;
+ 		pkt |= (((msg->tx_len) >> 8) & 0xffff) << 16;
+ 	} else {
+@@ -1015,6 +1016,7 @@ static ssize_t sun6i_dsi_transfer(struct mipi_dsi_host *host,
+ 		break;
+
+ 	case MIPI_DSI_DCS_LONG_WRITE:
++	case MIPI_DSI_GENERIC_LONG_WRITE:
+ 		ret = sun6i_dsi_dcs_write_long(dsi, msg);
+ 		break;
+

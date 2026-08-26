@@ -1,0 +1,259 @@
+# RetroBPI_M2M — Banana Pi BPI-M2 Magic (Allwinner A33, 4x Cortex-A7, Mali-400 MP2)
+#
+# Build #1 target: boot from SD to a serial shell on ttyS0 @ 115200,
+# carrying the full display/input bring-up toolkit so we never need a rebuild
+# just to get a diagnostic tool onto the board.
+#
+# Modelled on Buildroot's olimex_a33_olinuxino_defconfig (same SoC family).
+
+# --- Architecture -------------------------------------------------------
+BR2_arm=y
+BR2_cortex_a7=y
+BR2_ARM_EABIHF=y
+BR2_ARM_FPU_NEON_VFPV4=y
+
+# --- Toolchain ----------------------------------------------------------
+# glibc rather than uClibc: RetroArch and several libretro cores assume it,
+# and we have the storage budget.
+BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
+BR2_TOOLCHAIN_BUILDROOT_CXX=y
+BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_18=y
+
+# --- System -------------------------------------------------------------
+BR2_TARGET_GENERIC_HOSTNAME="retrobpi"
+BR2_TARGET_GENERIC_ISSUE="RetroBPI_M2M"
+BR2_TARGET_GENERIC_GETTY_PORT="ttyS0"
+BR2_TARGET_GENERIC_GETTY_BAUDRATE_115200=y
+# dropbear refuses root login with an empty password, so one has to be set for
+# SSH to work at all. Development credential — change before this ships.
+BR2_TARGET_GENERIC_ROOT_PASSWD="retrobpi"
+
+# DHCP on eth0 for the USB-Ethernet dev link (ssh/scp iteration loop).
+# NOTE: this adds a DHCP wait to boot when no cable is present -- revisit in
+# the fast-boot pass, where it should become a backgrounded/hotplug-driven
+# udhcpc rather than a blocking ifupdown stanza.
+BR2_SYSTEM_DHCP="eth0"
+BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y
+# Required by i2c-tools (it duplicates busybox applets)
+BR2_PACKAGE_BUSYBOX_SHOW_OTHERS=y
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_RETROBPI_PATH)/board/bpi-m2m/rootfs_overlay"
+# Two post-image scripts, run in order: ours builds the FAT32 ROM partition
+# image, then the stock wrapper assembles sdcard.img from genimage.cfg.
+BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_RETROBPI_PATH)/board/bpi-m2m/post-build.sh"
+BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_RETROBPI_PATH)/board/bpi-m2m/post-image.sh support/scripts/genimage.sh"
+BR2_ROOTFS_POST_SCRIPT_ARGS="-c $(BR2_EXTERNAL_RETROBPI_PATH)/board/bpi-m2m/genimage.cfg"
+BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_RETROBPI_PATH)/board/bpi-m2m/patches"
+
+# --- Kernel -------------------------------------------------------------
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.18.8"
+BR2_LINUX_KERNEL_DEFCONFIG="sunxi"
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_RETROBPI_PATH)/board/bpi-m2m/linux-retrogaming.config"
+BR2_LINUX_KERNEL_DTS_SUPPORT=y
+# Both DTBs get built: the stock one is the fallback if the panel DT misbehaves,
+# and extlinux uses fdtdir so U-Boot picks by name.
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="allwinner/sun8i-r16-bananapi-m2m allwinner/sun8i-a33-bananapi-m2m-ek79007 allwinner/sun8i-a33-bananapi-m2m-ws5b allwinner/sun8i-a33-bananapi-m2m-ws5b-nousb allwinner/sun8i-a33-bananapi-m2m-probe"
+BR2_LINUX_KERNEL_INSTALL_TARGET=y
+
+# --- U-Boot -------------------------------------------------------------
+BR2_TARGET_UBOOT=y
+BR2_TARGET_UBOOT_BUILD_SYSTEM_KCONFIG=y
+BR2_TARGET_UBOOT_CUSTOM_VERSION=y
+BR2_TARGET_UBOOT_CUSTOM_VERSION_VALUE="2026.01"
+BR2_TARGET_UBOOT_BOARD_DEFCONFIG="Bananapi_m2m"
+# Boot-time tuning: shorter autoboot delay, and no USB/network stack in U-Boot
+# (we boot from MMC). See the fragment for why the delay is 1 s and not 0.
+BR2_TARGET_UBOOT_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_RETROBPI_PATH)/board/bpi-m2m/uboot-fastboot.config"
+BR2_TARGET_UBOOT_NEEDS_DTC=y
+BR2_TARGET_UBOOT_NEEDS_PYLIBFDT=y
+BR2_TARGET_UBOOT_NEEDS_OPENSSL=y
+BR2_TARGET_UBOOT_NEEDS_GNUTLS=y
+BR2_TARGET_UBOOT_SPL=y
+BR2_TARGET_UBOOT_SPL_NAME="u-boot-sunxi-with-spl.bin"
+
+# --- Filesystem ---------------------------------------------------------
+# ext4 for build #1. Switches to read-only squashfs + separate data
+# partition once the system boots (see docs/strategy.md).
+BR2_TARGET_ROOTFS_EXT2=y
+BR2_TARGET_ROOTFS_EXT2_4=y
+BR2_TARGET_ROOTFS_EXT2_SIZE="512M"
+# BR2_TARGET_ROOTFS_TAR is not set
+
+# --- Bring-up toolkit ---------------------------------------------------
+# Display / DRM
+BR2_PACKAGE_LIBDRM=y
+
+# --- Mesa/lima: GPU acceleration ----------------------------------------
+# The Mali-400 MP2 and the lima kernel driver have been present since day one,
+# but with no Mesa on the target there was no userspace half: RetroArch was
+# built with HAVE_OPENGL/EGL/GLES all 0 and every frame was scaled and blitted
+# on the CPU into a DRM dumb buffer. Fine for NES/Game Boy at 800x480, not for
+# anything heavier or for shaders.
+#
+# lima is a render-only GPU: it has no display engine of its own, so Mesa
+# renders with lima and scans out through sun4i-drm. That split is why libdrm
+# and GBM matter here.
+BR2_PACKAGE_MESA3D=y
+BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_LIMA=y
+BR2_PACKAGE_MESA3D_GBM=y
+BR2_PACKAGE_MESA3D_OPENGL_EGL=y
+BR2_PACKAGE_MESA3D_OPENGL_ES=y
+BR2_PACKAGE_LIBDRM_INSTALL_TESTS=y
+# Input
+BR2_PACKAGE_EVTEST=y
+# I2C — needed to probe the panel MCU (0x45) and touch (0x38 / 0x14)
+BR2_PACKAGE_I2C_TOOLS=y
+# General debug
+BR2_PACKAGE_STRACE=y
+BR2_PACKAGE_USBUTILS=y
+# devmem2 was removed from Buildroot; busybox's devmem applet replaces it.
+BR2_PACKAGE_DTC=y
+BR2_PACKAGE_DTC_PROGRAMS=y
+# Filesystem tools
+BR2_PACKAGE_E2FSPROGS=y
+BR2_PACKAGE_DOSFSTOOLS=y
+
+# --- Launcher -----------------------------------------------------------
+# Pulls in SDL2 / SDL2_ttf / SDL2_image / freetype / libdrm.
+# The launcher calls SDL_Init(0) — no video subsystem — so SDL2 needs no
+# KMSDRM backend; it is used purely for TTF/IMG surface rendering, which the
+# launcher then blits into its own DRM dumb buffers.
+BR2_PACKAGE_RETROBPI_LAUNCHER=y
+# The panel is mounted upside down in the case; see rotation = <180> in
+# kernel/sun8i-a33-bananapi-m2m-ws5b.dts, which is the canonical record.
+BR2_PACKAGE_RETROBPI_LAUNCHER_PANEL_ROTATION=180
+# EK79007 geometry for bring-up; 800x480 for the Waveshare 5" (B) later.
+# Waveshare 5" DSI LCD (B). These were 1024x600 for the EK79007 bring-up panel;
+# left at that the launcher allocates a 1024x600 buffer for an 800x480 mode.
+BR2_PACKAGE_RETROBPI_LAUNCHER_PANEL_W=800
+BR2_PACKAGE_RETROBPI_LAUNCHER_PANEL_H=480
+
+# --- RetroArch ----------------------------------------------------------
+# The package tree was lifted from a Buildroot 2024.02 fork; it is now proven
+# on 2026.02, so this carries the full core set rather than the two-core smoke
+# test it started as.
+BR2_PACKAGE_RETROARCH=y
+BR2_PACKAGE_RETROARCH_RGUI=y
+BR2_PACKAGE_RETROARCH_ASSETS=y
+# BR2_PACKAGE_RETROARCH_NETWORKING is not set
+# BR2_PACKAGE_RETROARCH_HID is not set
+
+# --- libretro cores -----------------------------------------------------
+# Same set the Lyra project shipped. That board is also a Cortex-A7, so the
+# build characteristics carry over; what does NOT carry over is its GPU, and
+# nothing here depends on one.
+#
+# Nintendo
+BR2_PACKAGE_LIBRETRO_FCEUMM=y
+BR2_PACKAGE_LIBRETRO_NESTOPIA=y
+BR2_PACKAGE_LIBRETRO_QUICKNES=y
+BR2_PACKAGE_LIBRETRO_GAMBATTE=y
+BR2_PACKAGE_LIBRETRO_TGBDUAL=y
+BR2_PACKAGE_LIBRETRO_MGBA=y
+BR2_PACKAGE_LIBRETRO_SNES9X2005=y
+BR2_PACKAGE_LIBRETRO_SNES9X2010=y
+# Sega
+BR2_PACKAGE_LIBRETRO_GENESISPLUSGX=y
+# Atari
+BR2_PACKAGE_LIBRETRO_STELLA2023=y
+BR2_PACKAGE_LIBRETRO_PROSYSTEM=y
+# Atari 8-bit / 5200. Not in the Lyra set -- added because the ROM set on this
+# board has 92 Atari 800 titles and the launcher already had a system entry for
+# them pointing at a core that did not exist.
+BR2_PACKAGE_LIBRETRO_ATARI800=y
+# NEC
+BR2_PACKAGE_LIBRETRO_BEETLEPCEFAST=y
+BR2_PACKAGE_LIBRETRO_BEETLESUPERGRAFX=y
+# Arcade
+BR2_PACKAGE_LIBRETRO_FBALPHA2012=y
+BR2_PACKAGE_LIBRETRO_MAME2003PLUS=y
+# Home computers / DOS
+BR2_PACKAGE_LIBRETRO_FUSE=y
+BR2_PACKAGE_LIBRETRO_PRBOOM=y
+# PlayStation -- pcsx_rearmed. Chosen over beetlepsx (which this tree builds as
+# the software mednafen core) because pcsx_rearmed carries an ARM NEON dynarec
+# and was written for Pandora/GP2X-class hardware; beetle-psx is accuracy-first
+# and far too heavy for a 1.2 GHz A7. Note the Mali-400 cannot help with PSX
+# rasterisation -- the hardware-renderer PSX cores need GLES3/Vulkan features
+# this GPU does not have -- so the GPU only does the final scale and present.
+# Needs a BIOS: see system_directory in retroarch.cfg.
+BR2_PACKAGE_LIBRETRO_PCSX=y
+
+# Nintendo 64 -- parallel-n64, NOT mupen64plus-next. Mali-400 MP2 is GLES 2.0
+# only (no GLES3, no desktop GL) and -next needs GLES3/GL3. parallel-n64 keeps
+# the older glide64/rice renderers, which are GLES2. Marginal on a 1.2 GHz A7;
+# included to be measured.
+BR2_PACKAGE_LIBRETRO_PARALLELN64=y
+#
+# Known broken on the Lyra project, carried over as documentation so nobody
+# re-enables them expecting them to work. Re-test individually, do not assume:
+#   PICODRIVE  - submodule git server notaz.gp2x.de unreachable
+#   BLUEMSX    - OpenMsxYMF262.cpp compile errors, not fixable with -fcommon
+# BR2_PACKAGE_LIBRETRO_PICODRIVE is not set
+# BR2_PACKAGE_LIBRETRO_BLUEMSX is not set
+
+# gpSP: the GBA core. mGBA is a pure interpreter and does NOT hold 60 fps on a
+# Cortex-A7 -- the Lyra project measured that and switched. gpSP has an ARM
+# dynarec and was 3-5x faster on the same silicon. The old assembler bug that
+# had this disabled is fixed in the commit now pinned in its .mk.
+BR2_PACKAGE_LIBRETRO_GPSP=y
+# ALSA for RetroArch's audio driver
+BR2_PACKAGE_ALSA_LIB=y
+BR2_PACKAGE_ALSA_UTILS=y
+# alsa-utils was enabled but none of its TOOLS were, so the package installed
+# nothing usable -- aplay and amixer were simply absent on the target. amixer in
+# particular is not optional: the sun8i codec powers up with its mixer controls
+# muted and at zero, so without it there is no way to get sound out at all.
+# alsactl lets that state be saved and restored across reboots.
+BR2_PACKAGE_ALSA_UTILS_AMIXER=y
+BR2_PACKAGE_ALSA_UTILS_APLAY=y
+BR2_PACKAGE_ALSA_UTILS_ALSAMIXER=y
+BR2_PACKAGE_ALSA_UTILS_ALSACTL=y
+BR2_PACKAGE_ALSA_UTILS_SPEAKER_TEST=y
+
+# --- Host communication -------------------------------------------------
+# Two independent channels so iteration does not mean pulling the SD card.
+#
+# 1. ADB over the micro-USB OTG port — REMOVED. Buildroot ships android-tools
+#    4.2.2 (2013) and a modern adb client wedges the connection on anything
+#    beyond "devices", so this channel never worked. It also cost 1.18 s of
+#    every boot composing a functionfs gadget nothing could talk to.
+#    USB-Ethernet + SSH replaced it entirely.
+#
+# 2. Wi-Fi + SSH — AP6212 (BCM43438). Firmware and nvram are carried in the
+#    rootfs overlay under /lib/firmware/brcm; Buildroot's linux-firmware ships
+#    the AP6212 nvram but NOT brcmfmac43430-sdio.bin for this chip revision,
+#    so both files are vendored instead.
+BR2_PACKAGE_WPA_SUPPLICANT=y
+BR2_PACKAGE_WPA_SUPPLICANT_CLI=y
+BR2_PACKAGE_WPA_SUPPLICANT_PASSPHRASE=y
+BR2_PACKAGE_WPA_SUPPLICANT_NL80211=y
+BR2_PACKAGE_DROPBEAR=y
+# cfg80211 logs "failed to load regulatory.db" without this, which leaves the
+# radio on a restrictive built-in world domain.
+BR2_PACKAGE_WIRELESS_REGDB=y
+
+# --- Bluetooth: wireless DualShock 3 ------------------------------------
+# The DS3 is Bluetooth 2.0+EDR HID, not BLE, and cannot be paired the normal
+# way: the host's BD address has to be written into the controller over USB
+# first. BlueZ's sixaxis plugin does exactly that -- plug the pad in by USB
+# once, it gets paired, then it connects wirelessly from then on.
+BR2_PACKAGE_BLUEZ5_UTILS=y
+BR2_PACKAGE_BLUEZ5_UTILS_PLUGINS_SIXAXIS=y
+BR2_PACKAGE_BLUEZ5_UTILS_PLUGINS_HID=y
+BR2_PACKAGE_BLUEZ5_UTILS_CLIENT=y
+BR2_PACKAGE_BLUEZ5_UTILS_TOOLS=y
+
+# BCM43430A1.hcd patchram for the AP6212's Bluetooth side. Same silicon as the
+# RPi Zero W's BCM43438, which is what our DTS node already declares
+# (compatible = "brcm,bcm43438-bt"), so the RPi firmware blob is the right one.
+BR2_PACKAGE_BRCMFMAC_SDIO_FIRMWARE_RPI=y
+BR2_PACKAGE_BRCMFMAC_SDIO_FIRMWARE_RPI_BT=y
+
+# --- Host tools for image assembly --------------------------------------
+BR2_PACKAGE_HOST_DOSFSTOOLS=y
+BR2_PACKAGE_HOST_GENIMAGE=y
+# mkfs.vfat + mcopy/mmd, used by post-image.sh to build the ROM partition
+BR2_PACKAGE_HOST_MTOOLS=y
+BR2_PACKAGE_RETROBPI_TOOLS=y

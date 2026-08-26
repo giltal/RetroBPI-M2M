@@ -1,0 +1,149 @@
+input: edt-ft5x06 - support polling when no interrupt is wired
+
+edt_ft5x06_ts_probe() unconditionally calls devm_request_threaded_irq().
+When the controller has no interrupt line, client->irq is 0, the request
+fails, and it takes the whole probe down with it:
+
+  edt_ft5x06 0-0038: error -EINVAL: request_irq(0) 0x0 edt_ft5x06_ts_isr edt-ft5506
+  edt_ft5x06 0-0038: Unable to request touchscreen IRQ.
+  edt_ft5x06 0-0038: probe with driver edt_ft5x06 failed with error -22
+
+This is the normal case on Raspberry Pi DSI panels and the many clones reusing
+the 15-pin RPi DSI connector: that connector carries the I2C pair but has no
+pin for the touch interrupt, so no cable can supply one. The controller works
+perfectly well polled over I2C instead.
+
+Fall back to input_setup_polling() when client->irq is not valid, and guard the
+enable_irq()/disable_irq() calls in the factory-mode and suspend/resume paths so
+they are never issued against irq 0.
+
+Tested on a BananaPi M2 Magic (A33) driving a Waveshare 5inch DSI LCD (B) over a
+CN2-to-RPi-15pin adapter, with an FT5506 at 0x38 and no interrupt line.
+
+Signed-off-by: RetroBPI_M2M
+
+--- a/drivers/input/touchscreen/edt-ft5x06.c
++++ b/drivers/input/touchscreen/edt-ft5x06.c
+@@ -34,6 +34,12 @@
+ 
+ #include <linux/unaligned.h>
+ 
++/*
++ * Polling rate used when the controller has no usable interrupt line.
++ * ~60 Hz keeps touch responsive without hammering the I2C bus.
++ */
++#define EDT_FT5X06_POLL_INTERVAL_MS	17
++
+ #define WORK_REGISTER_THRESHOLD		0x00
+ #define WORK_REGISTER_REPORT_RATE	0x08
+ #define WORK_REGISTER_GAIN		0x30
+@@ -346,6 +352,13 @@
+ 	return IRQ_HANDLED;
+ }
+ 
++static void edt_ft5x06_ts_poll(struct input_dev *input)
++{
++	struct edt_ft5x06_ts_data *tsdata = input_get_drvdata(input);
++
++	edt_ft5x06_ts_isr(0, tsdata);
++}
++
+ struct edt_ft5x06_attribute {
+ 	struct device_attribute dattr;
+ 	size_t field_offset;
+@@ -613,7 +626,8 @@
+ 		return -EINVAL;
+ 	}
+ 
+-	disable_irq(client->irq);
++	if (client->irq > 0)
++		disable_irq(client->irq);
+ 
+ 	if (!tsdata->raw_buffer) {
+ 		tsdata->raw_bufsize = tsdata->num_x * tsdata->num_y *
+@@ -656,7 +670,8 @@
+ 	kfree(tsdata->raw_buffer);
+ 	tsdata->raw_buffer = NULL;
+ 	tsdata->factory_mode = false;
+-	enable_irq(client->irq);
++	if (client->irq > 0)
++		enable_irq(client->irq);
+ 
+ 	return error;
+ }
+@@ -697,7 +712,8 @@
+ 	tsdata->raw_buffer = NULL;
+ 
+ 	edt_ft5x06_restore_reg_parameters(tsdata);
+-	enable_irq(client->irq);
++	if (client->irq > 0)
++		enable_irq(client->irq);
+ 
+ 	return 0;
+ }
+@@ -1328,17 +1344,34 @@
+ 		return error;
+ 	}
+ 
+-	irq_flags = irq_get_trigger_type(client->irq);
+-	if (irq_flags == IRQF_TRIGGER_NONE)
+-		irq_flags = IRQF_TRIGGER_FALLING;
+-	irq_flags |= IRQF_ONESHOT;
+-
+-	error = devm_request_threaded_irq(&client->dev, client->irq,
+-					  NULL, edt_ft5x06_ts_isr, irq_flags,
+-					  client->name, tsdata);
+-	if (error) {
+-		dev_err(&client->dev, "Unable to request touchscreen IRQ.\n");
+-		return error;
++	input_set_drvdata(input, tsdata);
++
++	if (client->irq > 0) {
++		irq_flags = irq_get_trigger_type(client->irq);
++		if (irq_flags == IRQF_TRIGGER_NONE)
++			irq_flags = IRQF_TRIGGER_FALLING;
++		irq_flags |= IRQF_ONESHOT;
++
++		error = devm_request_threaded_irq(&client->dev, client->irq,
++						  NULL, edt_ft5x06_ts_isr,
++						  irq_flags, client->name,
++						  tsdata);
++		if (error) {
++			dev_err(&client->dev,
++				"Unable to request touchscreen IRQ.\n");
++			return error;
++		}
++	} else {
++		error = input_setup_polling(input, edt_ft5x06_ts_poll);
++		if (error) {
++			dev_err(&client->dev,
++				"Unable to set up polling: %d\n", error);
++			return error;
++		}
++
++		input_set_poll_interval(input, EDT_FT5X06_POLL_INTERVAL_MS);
++		dev_dbg(&client->dev, "no irq, polling every %u ms\n",
++			EDT_FT5X06_POLL_INTERVAL_MS);
+ 	}
+ 
+ 	error = input_register_device(input);
+@@ -1391,7 +1424,8 @@
+ 	 * settings. Disable the irq to avoid adjusting each host till the
+ 	 * device is back in a full functional state.
+ 	 */
+-	disable_irq(tsdata->client->irq);
++	if (tsdata->client->irq > 0)
++		disable_irq(tsdata->client->irq);
+ 
+ 	gpiod_set_value_cansleep(reset_gpio, 1);
+ 	usleep_range(1000, 2000);
+@@ -1453,7 +1487,8 @@
+ 		msleep(300);
+ 
+ 		edt_ft5x06_restore_reg_parameters(tsdata);
+-		enable_irq(tsdata->client->irq);
++		if (tsdata->client->irq > 0)
++			enable_irq(tsdata->client->irq);
+ 
+ 		if (tsdata->factory_mode)
+ 			ret = edt_ft5x06_factory_mode(tsdata);

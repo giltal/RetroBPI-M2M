@@ -1,0 +1,72 @@
+regulator: rpi-panel-attiny: retry the firmware revision read
+
+attiny_i2c_probe() reads REG_ID exactly once and returns -ENODEV if the value
+is not a known revision. -ENODEV is permanent, so the probe is never retried.
+
+The panel's MCU may still be starting at that point. On a BananaPi M2 Magic the
+first read returns 0x8b, while a moment later it returns the correct 0xc3. This
+only began failing after an unrelated boot-time change (adding "quiet" to the
+kernel cmdline) moved this probe from ~1.5 s to ~0.5 s after power-on -- the
+hardware dependency was always there, merely hidden by a slow boot.
+
+The consequence is disproportionate: this MCU supplies power, backlight and
+reset to the panel, so its failure leaves the DSI panel unattached, the
+connector "disconnected", and the display dark:
+
+  rpi_touchscreen_attiny 0-0045: Unknown Atmel firmware revision: 0x8b
+  mipi-dsi 1ca0000.dsi.0: deferred probe pending: supplier 0-0045 not ready
+
+Retry the read for about a second before giving up.
+
+Signed-off-by: RetroBPI_M2M
+
+--- a/drivers/regulator/rpi-panel-attiny-regulator.c
++++ b/drivers/regulator/rpi-panel-attiny-regulator.c
+@@ -32,6 +32,10 @@
+ #define REG_WRITE_DATA_H	0x90
+ #define REG_WRITE_DATA_L	0x91
+ 
++/* How long to wait for the panel MCU to come up before giving up. */
++#define ATTINY_ID_RETRIES	20
++#define ATTINY_ID_RETRY_MS	50
++
+ #define PA_LCD_DITHB		BIT(0)
+ #define PA_LCD_MODE		BIT(1)
+ #define PA_LCD_LR		BIT(2)
+@@ -281,6 +285,7 @@
+ 	struct attiny_lcd *state;
+ 	struct regmap *regmap;
+ 	unsigned int data;
++	unsigned int attempt;
+ 	int ret;
+ 
+ 	state = devm_kzalloc(&i2c->dev, sizeof(*state), GFP_KERNEL);
+@@ -300,8 +305,27 @@
+ 			ret);
+ 		return ret;
+ 	}
++	/*
++	 * The panel's MCU may still be starting when we get here. On a fast boot
++	 * this probe runs ~0.5 s after power-on and the first REG_ID read comes
++	 * back as garbage (0x8b seen on a BananaPi M2 Magic), while a moment
++	 * later it reads the correct 0xc3.
++	 *
++	 * Reading once and returning -ENODEV is fatal, and it takes the display
++	 * with it: this MCU supplies power, backlight and reset to the panel, so
++	 * the DSI panel never attaches and the connector reports disconnected.
++	 * Retry for about a second before giving up.
++	 */
++	for (attempt = 0; attempt < ATTINY_ID_RETRIES; attempt++) {
++		ret = attiny_i2c_read(i2c, REG_ID, &data);
++		if (ret >= 0 && (data == 0xde || data == 0xc3))
++			break;
++		msleep(ATTINY_ID_RETRY_MS);
++	}
++
++	if (attempt)
++		dev_info(&i2c->dev, "panel MCU ready after %d retries\n", attempt);
+ 
+-	ret = attiny_i2c_read(i2c, REG_ID, &data);
+ 	if (ret < 0) {
+ 		dev_err(&i2c->dev, "Failed to read REG_ID reg: %d\n", ret);
+ 		return ret;

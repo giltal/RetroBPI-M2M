@@ -1,0 +1,37 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * ws5b device tree with USB disabled - a DIAGNOSTIC build, not a product one.
+ *
+ * The board resets hard, mid-printk with no panic, consistently at USB
+ * bring-up, but ONLY when the DSI is driving a connected panel:
+ *
+ *   panel off cable + DSI active   -> stable
+ *   panel on cable  + DSI inactive -> stable
+ *   panel on cable  + DSI active   -> reset at ohci/ehci probe
+ *
+ * Both consumers sit on the same AXP223 rail. VCC-DSI is DCDC1, shared with
+ * VCC-3V0 (the SoC I/O rail), and the USB host VBUS is made by the U3 boost
+ * which also runs off VCC-3V0. So the hypothesis is that the DSI PHY driving a
+ * real load plus the USB boost starting exceeds what DCDC1 will give, and the
+ * PMIC cuts it - which is why no external supply has helped.
+ *
+ * If this DTB is stable with the panel connected and lit, that confirms it.
+ */
+
+#include "sun8i-a33-bananapi-m2m-ws5b.dts"
+
+&usbphy {
+	status = "disabled";
+};
+
+&ehci0 {
+	status = "disabled";
+};
+
+&ohci0 {
+	status = "disabled";
+};
+
+&usb_otg {
+	status = "disabled";
+};

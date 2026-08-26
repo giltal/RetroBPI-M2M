@@ -1,0 +1,47 @@
+#!/bin/sh
+#
+# Configure Wi-Fi so the board stays reachable when Ethernet is pulled.
+#
+#   wifi-setup "MySSID" "mypassphrase"     configure and bring up now
+#   wifi-setup --status                    show current state
+#   wifi-setup --forget                    remove the saved network
+#
+# Credentials are deliberately NOT shipped in the image: this writes them to
+# /etc/wpa_supplicant.conf on the running board only. S49wifi reads that file at
+# boot and stays out of the way when it holds no network, so an unconfigured
+# board still boots at full speed instead of blocking on association.
+#
+# Once configured, wlan0 comes up at boot alongside eth0. Pulling the Ethernet
+# then leaves the board reachable over Wi-Fi rather than serial only.
+
+CONF=/etc/wpa_supplicant.conf
+IFACE=wlan0
+
+status() {
+	echo "wlan0 state : $(cat /sys/class/net/$IFACE/operstate 2>/dev/null || echo 'no interface')"
+	echo "configured  : $(grep -qE '^[[:space:]]*ssid=' $CONF 2>/dev/null && echo yes || echo no)"
+	echo "supplicant  : $(ps w | grep -c '[w]pa_supplicant') running"
+	echo "address     : $(ip -4 addr show $IFACE 2>/dev/null | grep -o 'inet [0-9.]*' || echo none)"
+	echo "eth0        : $(ip -4 addr show eth0 2>/dev/null | grep -o 'inet [0-9.]*' || echo none)"
+}
+
+case "$1" in
+--status|"") status; exit 0 ;;
+--forget)
+	sed -i '/^network={/,/^}/d' "$CONF" 2>/dev/null
+	echo "network removed; wlan0 will be skipped at next boot"
+	exit 0 ;;
+esac
+
+SSID="$1"
+PSK="$2"
+[ -n "$SSID" ] && [ -n "$PSK" ] || { echo "usage: wifi-setup \"SSID\" \"passphrase\""; exit 1; }
+
+# wpa_passphrase hashes the key, so the plaintext is not left in the file.
+wpa_passphrase "$SSID" "$PSK" | grep -v '^\s*#psk=' >> "$CONF" || exit 1
+chmod 600 "$CONF"
+echo "saved to $CONF"
+
+/etc/init.d/S49wifi restart 2>/dev/null || /etc/init.d/S49wifi start
+sleep 5
+status

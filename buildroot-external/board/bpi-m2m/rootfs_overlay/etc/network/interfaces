@@ -1,0 +1,39 @@
+# RetroBPI_M2M network configuration.
+#
+# Shipped from the rootfs overlay rather than relying on BR2_SYSTEM_DHCP.
+# That option only generates this file when the skeleton package builds, and
+# Buildroot's target/ tree is incremental -- on a rebuild the old loopback-only
+# file simply survives and eth0 never appears. The overlay is copied at
+# target-finalize every time, so it always wins.
+
+auto lo
+iface lo inet loopback
+
+# USB-Ethernet adapter on one of the host ports: the dev iteration link
+# (ssh/scp from the workstation). ADB is not usable on this image -- Buildroot
+# ships android-tools 4.2.2 from 2013 and a modern adb client wedges the
+# connection on any request beyond "devices".
+#
+# BOOT TIME: this is a blocking ifupdown stanza, so a missing cable costs a
+# DHCP timeout. Fine during bring-up; the fast-boot pass should move this to a
+# backgrounded or hotplug-driven udhcpc.
+# BOOT TIME: this used to be "iface eth0 inet dhcp", which runs udhcpc in the
+# FOREGROUND. With no cable attached that costs several seconds of every boot,
+# and it also loses a race at power-on -- the r8152 needs ~3 s to enumerate and
+# get carrier, so a boot where the network script wins prints
+#     udhcpc: no lease, forking to background
+# and the interface ends up with no address even though the cable is in.
+#
+# Running udhcpc with -b instead makes it background itself rather than block:
+# init continues immediately, and the lease is picked up whenever carrier
+# appears. -t 3 -T 1 keeps the foreground phase short.
+#
+# STILL MISSING: hot-plug. Swapping the USB adapter at runtime leaves eth0 up
+# but unconfigured, because nothing re-runs udhcpc. A udev rule on
+# SUBSYSTEM=="net", ACTION=="add" is the proper fix and is not done yet.
+auto eth0
+iface eth0 inet manual
+	up ip link set $IFACE up
+	up /sbin/udhcpc -b -i $IFACE -t 3 -T 1 -S -p /var/run/udhcpc.$IFACE.pid
+	down /sbin/udhcpc -i $IFACE -p /var/run/udhcpc.$IFACE.pid -x || true
+	down ip link set $IFACE down
