@@ -3516,9 +3516,136 @@ as the unmodified GPL body -- copied from Buildroot's `COPYING`, not reconstruct
 The root password `retrobpi` in the defconfig is public and permanent in history.
 Raised before publishing; Gil's call was to leave it.
 
+### N64 analog stick: verified end to end, and two errors of mine
+
+Gil: *"steering feels like it is a digital joystick"*, and later *"the joystick
+actually should function as a steering wheel and not as a D-Pad"*. He was right
+that it should, and it does. The coarseness is the game.
+
+#### The chain, measured at every stage
+
+```
+DualShock 3 -> evdev      123 distinct ABS_X values, range 0..255, centre 128
+autoconfig                all 8 axis directions bound (l_x +-0, l_y +-1, r_x +-3, r_y +-4)
+RetroArch -> core         52 distinct magnitude bins delivered (of 64 sampled)
+core maths                output histogram matches input histogram exactly
+core -> emulated N64      full +-80 range reached
+```
+
+`analog_dpad_mode` is unset, so the default `ANALOG_DPAD_NONE` applies and nothing
+converts the stick to a d-pad. The core reads `RETRO_DEVICE_ANALOG` directly and
+maps `ANALOG_LEFT` to the Control Stick, `ANALOG_RIGHT` to the C buttons.
+
+#### Error 1: sensitivity 120 was actively harmful
+
+Suggested raising `astick-sensitivity` to 120 before working out what the number
+does. The core maps a full deflection as:
+
+```c
+radius *= 80.0 / ASTICK_MAX * (astick_sensitivity / 100.0);   /* ASTICK_MAX = 0x8000 */
+```
+
+The N64 stick range is +-80, and **nothing clamps the result**. At 100 a full push
+maps to exactly 80; at 120 it produces 96. The outer ~17% of stick travel then does
+nothing but hold full lock, and full lock arrives early -- precisely the edginess
+being complained about. Reverted to 100.
+
+The lever that actually shapes feel is the **deadzone**, and it works the opposite
+way to intuition:
+
+```c
+radius = (radius - astick_deadzone) * (ASTICK_MAX / (ASTICK_MAX - astick_deadzone));
+```
+
+The remaining travel is rescaled back to full range, so a *larger* deadzone
+compresses the whole response into less stick movement -- steeper, not gentler.
+The 15% default spent the first 15% of throw doing nothing and covered everything
+in the other 85%. Shipped **deadzone 5**, sensitivity 100.
+
+#### Error 2: misreading the first histogram
+
+The `X_AXIS` histogram showed 94% centre and, of the non-centre samples, 88% at
+full lock with ~12% in between. This was called "the signature of quantisation".
+**It is not.** It is a distribution over *time*: most of a lap is spent going
+straight, then the stick is pushed to full lock and *held* through each corner,
+which accumulates hundreds of samples at the extreme while each transition
+contributes a handful.
+
+The measurement that actually tests quantisation is the count of distinct values,
+not the shape of the time distribution. Raw input showed **52 distinct magnitude
+bins**, and the ~85 intermediate samples spanned roughly 50 of them -- nearly
+every mid-range sample a different value. Textbook proportional input, passing
+through quickly.
+
+A histogram weighted by dwell time cannot distinguish "few intermediate values"
+from "intermediate values held briefly". Count distinct values for that.
+
+#### Shipped
+
+```
+parallel-n64-astick-sensitivity = "100"   /* 120 overdrives past the N64's +-80 */
+parallel-n64-astick-deadzone    = "5"     /* down from 15; gentler curve near centre */
+```
+
+Instrumentation reverted; source pristine and the shipped core carries none of it.
+
+### N64 frameskip: asked for, and it does not exist
+
+The question was whether we could buy back the 640x480 visuals by skipping frames, the way
+RetroESP32_P4 holds 60 FPS on 16-bit emulators. The answer is no, and the reason is structural
+rather than a missing option.
+
+- `parallel-n64-framerate` looks like the knob but is not one. It sets `frame_dupe`, which
+  *duplicates* a frame by calling `video_cb(NULL, ...)` -- the frame is still fully rendered,
+  it is just presented twice. That is why measuring it moved nothing: 814 vs 809 permille.
+- rice has a `bSkipFrame`, and it is dead code. Two references exist in the whole tree:
+  the declaration at `Config.h:219` and `ConfigGetParamBool(l_ConfigVideoRice, "SkipFrame")`
+  at `RiceConfig.cpp:426`. Nothing ever reads it. Setting it would do exactly nothing.
+- glide64 has no equivalent at all.
+- RetroArch's own `fastforward_frameskip` only applies while fast-forward is engaged.
+
+Why the ESP32-P4 technique does not transfer: on a 16-bit emulator the frame is a bitmap the
+emulator hands over at the end of a scanline loop, so dropping the *presentation* of that
+bitmap saves the blit and nothing else needs to know. On N64 the cost is 3D rasterisation
+performed *inside the graphics plugin while it walks the display list*. By the time there is
+a frame to skip, the work that made it expensive has already been paid for. Skipping it
+properly would mean not walking the display list -- which desynchronises RDP state, because
+later display lists depend on framebuffer contents earlier ones produced.
+
+So 320x240 native stays the answer. The board is GPU-bound at 88% CPU with ~12% blocked on
+Mali; there is no frame-pacing trick that recovers the difference.
+
+### Near-miss: an instrumented core reached a built image
+
+Worth recording because it is a *new variant* of the stale-`target/` trap, and the fifth time
+that trap has bitten.
+
+The sequence: the analog investigation patched the N64 core with a histogram probe. When it was
+done I restored the source, verified it (`astick_probe refs left: 0`), and built an image. The
+source was genuinely pristine. The **binary was not** -- `target/` is incremental, and nothing
+in the restore triggered a rebuild of the `.so`. The image was built, copied to `firmware/`,
+and announced as good. md5 `98fc4d3d...` contained a diagnostic core.
+
+It was caught only because an ad-hoc push script happened to run `strings` on the core before
+copying it to the board. That is luck, not process.
+
+The lesson generalises past this repo: **verifying the source is not the same as verifying the
+artifact.** Every previous instance of this trap was caught by checking a file's presence or
+contents; none of them would have caught a stale binary built from correct source.
+
+Fix, now in `buildroot-external/board/bpi-m2m/post-build.sh`: before an image is assembled,
+every `.so` under `usr/lib/libretro/` is scanned for probe markers (`astick.log`, `glitch.log`,
+`ra_audio.log`, `speed_permille`, `RETROBPI_AUDIO_PROBE`) and the build **fails** if any match.
+Tested both directions -- an instrumented core exits 1 with a named error, clean cores exit 0.
+The check costs a `strings` pass over ~20 files and runs on every image build, so it cannot be
+forgotten the way an ad-hoc script can.
+
+Good image after recovery: `c290f2ada21e687e137e2167c997ba3e`. Board N64 core `7018d969...`,
+instrumentation markers 0.
+
 ### Current state (2026-08-26)
 
-`firmware/sdcard.img` md5 `39c50ee53dfde661724d71b6e40a311a`. Board verified
+`firmware/sdcard.img` md5 `114a0e11cc315c064b77706a2bd83291`. Board verified
 byte-identical to this image across all 27 checked files plus kernel and DTB, so
 SSH pushes and a fresh flash produce the same system.
 

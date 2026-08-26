@@ -87,3 +87,35 @@ parallel-n64-send_allist_to_hle_rsp = "enabled"
 # Mario Kart 64 is a demanding title. Lighter N64 games may well be fine; that
 # has not been tested, because the only N64 ROMs on the card are two heavy 3D
 # titles.
+
+# ---------------------------------------------------------------------------
+# Analog stick response.
+#
+# The pad is genuinely proportional -- captured from evdev, 123 distinct values
+# across ABS_X over its full 0..255 range, centre at 128. So this is shaping real
+# analog data, not compensating for a digital stick.
+#
+# SENSITIVITY 100, NOT HIGHER. The core maps a full deflection like this:
+#
+#     radius *= 80.0 / ASTICK_MAX * (astick_sensitivity / 100.0)
+#
+# The N64 stick range is +-80 and ASTICK_MAX is 0x8000, so 100 maps a full push
+# to exactly 80. At 120 it produces 96, and nothing clamps it: the outer ~17% of
+# stick travel does nothing but sit at full lock, and full lock arrives early.
+# That reads as edgy and digital. 120 was tried and was worse.
+#
+# DEADZONE 5, DOWN FROM THE 15 DEFAULT. This is the lever for edginess, and it
+# works the opposite way round to intuition:
+#
+#     radius = (radius - deadzone) * (ASTICK_MAX / (ASTICK_MAX - deadzone))
+#
+# The remaining travel is rescaled back to the full range, so a LARGER deadzone
+# compresses the whole range into less stick movement -- a steeper curve, less
+# fine control. 15 spends the first 15% of travel doing nothing and then covers
+# everything in the other 85%. 5 leaves just enough to absorb centre noise while
+# spreading the response across 95% of the throw.
+#
+# If the stick ever drifts at rest, raise the deadzone back toward 10.
+# ---------------------------------------------------------------------------
+parallel-n64-astick-sensitivity = "100"
+parallel-n64-astick-deadzone = "5"

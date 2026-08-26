@@ -58,4 +58,22 @@ if [ -e "$stale" ]; then
 	exit 1
 fi
 
+# Guard: no diagnostic instrumentation may reach an image.
+#
+# Cores get temporarily patched with probes during investigations (audio clip
+# detection, emulation-speed timing, analog-stick histograms). Restoring the
+# SOURCE to pristine does NOT rebuild the binary, and target/ is incremental --
+# so an instrumented .so survives into the image while the source looks clean.
+# That happened: an image was built and copied to firmware/ containing an
+# analog-probe build, and was only caught by a strings check in a push script.
+# Verifying the source is not the same as verifying the artifact.
+for so in "$TARGET_DIR"/usr/lib/libretro/*.so; do
+	[ -e "$so" ] || continue
+	if strings "$so" 2>/dev/null | grep -qE 'astick\.log|glitch\.log|ra_audio\.log|speed_permille|RETROBPI_AUDIO_PROBE'; then
+		echo "post-build.sh: ERROR: $(basename $so) contains diagnostic instrumentation" >&2
+		echo "  rebuild it from pristine source before building an image" >&2
+		exit 1
+	fi
+done
+
 echo "post-build.sh: image cleaned; launcher script: $(ls "$TARGET_DIR"/etc/init.d/S??launcher | sed 's|.*/||')"
