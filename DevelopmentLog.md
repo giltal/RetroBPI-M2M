@@ -3723,6 +3723,35 @@ pairing -- the pad must be cable-paired once more. BlueZ's pairing DB is keyed
 by adapter address too, so `/var/lib/bluetooth/AA:AA:AA:AA:AA:AA/` is now dead
 and a fresh `02:00:00:42:50:49/` has taken over.
 
+**Re-paired and confirmed on hardware.** Cable pairing over USB, with the auto
+agent doing its job:
+
+    /var/lib/bluetooth/02:00:00:42:50:49/A0:5A:5E:9D:2C:1D   <- link key, new adapter
+    sony ...: BLUETOOTH HID v80.00 Joystick
+        [Sony PLAYSTATION(R)3 Controller] on 02:00:00:42:50:49
+
+Both failure signatures checked and clear: zero `sixaxis ... failed` lines in
+dmesg, zero "Authentication attempt without agent" in the agent log. The stale
+`/var/lib/bluetooth/AA:AA:AA:AA:AA:AA/` tree was then removed, guarded by a
+check that the new adapter actually holds a link key first.
+
+**USB port note, learned the annoying way.** Ethernet on this board is a USB
+dongle (RTL8153) on the USB-A port, and that is the same port a DS3 needs for
+cable pairing. Pairing therefore takes the network -- and SSH -- down with it:
+
+    usb1  EHCI  <- USB-A, occupied by "USB 10/100/1000 LAN"
+    usb2  MUSB  <- micro-USB OTG, running in HOST mode, free
+    usb3  OHCI  <- companion controller, same physical port as usb1
+
+The micro-USB OTG port is a host and is free, so with an OTG adapter the pad can
+be cable-paired without touching Ethernet. Worth remembering before starting any
+remote watcher during a pairing: the board will simply vanish mid-operation
+otherwise, which looks like a failure and is not one.
+
+**After a reflash the pad needs one more cable pair.** The adapter address is
+baked into the DT, so it stays 02:00:00:42:50:49 and the address stored in the
+pad stays valid -- but the link keys live on the rootfs and a flash wipes them.
+
 **Still fixed, not per-board.** Every unit built from this image gets the same
 address. Making it per-board needs the bootloader to write the property (the
 kernel comment literally says "Allow the bootloader to set a valid address
