@@ -1,0 +1,84 @@
+From: RetroBPI_M2M <noreply@example.com>
+Date: Wed, 26 Aug 2026 00:00:00 +0300
+Subject: [PATCH] Bluetooth: hci_bcm: honour local-bd-address when no patchram
+ file is loaded
+
+The AP6212 (BCM43430A1) on the BPI-M2 Magic comes up with the ROM default
+address AA:AA:AA:AA:AA:AA, even though the board DT supplies a valid
+local-bd-address. Every pairing and every hid device is then reported
+against that default:
+
+  sony 0005:054C:0268.0001: BLUETOOTH HID v80.00 Joystick
+      [Sony PLAYSTATION(R)3 Controller] on aa:aa:aa:aa:aa:aa
+
+The cause is an ordering problem rather than a missing property. BT_HCIUART
+is built in, so hci_bcm probes at ~0.97s, long before the rootfs is mounted
+(brcmfmac only gets its firmware at ~5.0s). request_firmware() for the
+patchram therefore fails:
+
+  Bluetooth: hci0: BCM: firmware Patch file not found, tried:
+  Bluetooth: hci0: BCM: 'brcm/BCM43430A1.hcd'
+
+...even though that file is present on the rootfs. bcm_setup() then takes
+
+	if (!fw_load_done)
+		return 0;
+
+and returns eleven lines above the code that would have made the DT
+property matter:
+
+	if (hci_test_quirk(hu->hdev, HCI_QUIRK_INVALID_BDADDR))
+		hci_set_quirk(hu->hdev, HCI_QUIRK_USE_BDADDR_PROPERTY);
+
+Without the patchram, btbcm_finalize() -- and with it btbcm_check_bdaddr(),
+which is what sets HCI_QUIRK_INVALID_BDADDR -- never runs. So neither quirk
+is ever set, hci_dev_init_sync() never calls
+hci_dev_get_bd_addr_from_property(), and the DT address is silently ignored.
+
+Set the quirk on the no-patchram path as well. The property is checked for
+presence first: setting HCI_QUIRK_USE_BDADDR_PROPERTY with no property to
+back it leaves public_addr as BDADDR_ANY, which keeps invalid_bdaddr true
+and starts the controller HCI_UNCONFIGURED -- worse than a wrong address.
+
+hdev->set_bdaddr is assigned at the top of bcm_setup(), before the early
+return, so it is already in place for hci_dev_init_sync() to use. The
+vendor Write_BD_ADDR (0xFC01) that btbcm_set_bdaddr() issues was verified
+to work on this chip's unpatched ROM firmware by setting the address at
+runtime over mgmt before writing this patch -- worth confirming, because a
+failing set_bdaddr() makes hci_dev_init_sync() return non-zero and the
+controller disappear entirely.
+
+Signed-off-by: RetroBPI_M2M <noreply@example.com>
+---
+ drivers/bluetooth/hci_bcm.c | 19 ++++++++++++++++++-
+ 1 file changed, 18 insertions(+), 1 deletion(-)
+
+--- a/drivers/bluetooth/hci_bcm.c
++++ b/drivers/bluetooth/hci_bcm.c
+@@ -595,8 +595,25 @@
+ 	if (err)
+ 		return err;
+ 
+-	if (!fw_load_done)
++	if (!fw_load_done) {
++		/* No patchram file was found -- typically because the
++		 * controller probes before the rootfs holding it is mounted.
++		 * btbcm_finalize(), and with it btbcm_check_bdaddr(), will not
++		 * run, so HCI_QUIRK_INVALID_BDADDR is never set and the DT
++		 * property is never consulted: the controller silently keeps
++		 * its ROM default address.
++		 *
++		 * Honour local-bd-address here instead. Only do so when the
++		 * property is actually present -- setting the quirk without
++		 * one leaves public_addr empty, which starts the controller
++		 * unconfigured and unusable.
++		 */
++		if (hu->hdev->dev.parent &&
++		    device_property_present(hu->hdev->dev.parent,
++					    "local-bd-address"))
++			hci_set_quirk(hu->hdev, HCI_QUIRK_USE_BDADDR_PROPERTY);
+ 		return 0;
++	}
+ 
+ 	/* Init speed if any */
+ 	if (bcm->dev && bcm->dev->init_speed)

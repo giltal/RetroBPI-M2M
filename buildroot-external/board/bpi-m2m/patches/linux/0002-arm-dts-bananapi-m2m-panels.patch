@@ -96,7 +96,7 @@ Signed-off-by: RetroBPI_M2M
 +};
 --- /dev/null
 +++ b/arch/arm/boot/dts/allwinner/sun8i-a33-bananapi-m2m-ws5b.dts
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,209 @@
 +// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 +/*
 + * Banana Pi BPI-M2 Magic (A33) + Waveshare 5inch DSI LCD (B), 800x480,
@@ -270,7 +270,7 @@ Signed-off-by: RetroBPI_M2M
 + * Give the Bluetooth controller a real address.
 + *
 + * The base DTS declares the BCM43430A1 as a serdev child of uart1. Because
-+ * CONFIG_BT_HCIUART is built in, the driver binds at ~2.3 s -- before the
++ * CONFIG_BT_HCIUART is built in, the driver binds at ~0.97 s -- before the
 + * rootfs is mounted -- so brcm/BCM43430A1.hcd cannot be loaded and the chip
 + * runs on its ROM firmware. That works, but it reports the unprogrammed
 + * default address AA:AA:AA:AA:AA:AA.
@@ -284,9 +284,17 @@ Signed-off-by: RetroBPI_M2M
 + * shows up as 02:00:00:42:50:49. 0x02 in the leading (displayed) octet marks
 + * it locally administered, so it cannot collide with a real assignment.
 + *
++ * THIS PROPERTY DOES NOTHING ON ITS OWN. Because the patchram file is never
++ * found, bcm_setup() returns early and never sets HCI_QUIRK_INVALID_BDADDR,
++ * so hci_dev_init_sync() never calls hci_dev_get_bd_addr_from_property() and
++ * this address is silently ignored. It took a kernel patch --
++ * 0007-bluetooth-hci_bcm-honour-DT-bd-address-without-patchram.patch -- to
++ * make it take effect. Do not drop that patch and expect this to still work.
++ *
 + * PRODUCT NOTE: this is a fixed address baked into the image, so every board
 + * built from it is identical. Fine for one bench unit; before shipping, derive
-+ * it from the SoC serial (/sys/bus/soc/devices/soc0/serial_number) and set it
++ * it from the SoC serial (the Serial line in /proc/cpuinfo -- note that
++ * /sys/bus/soc/devices/soc0/serial_number does NOT exist here) and set it
 + * at runtime, or two devices in the same room will conflict.
 + *
 + * The alternative -- loading the patchram by making BT_HCIUART a module -- was

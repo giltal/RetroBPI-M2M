@@ -3643,9 +3643,105 @@ forgotten the way an ad-hoc script can.
 Good image after recovery: `c290f2ada21e687e137e2167c997ba3e`. Board N64 core `7018d969...`,
 instrumentation markers 0.
 
+### Fix: Bluetooth MAC -- the DT property was there all along, and inert
+
+The adapter reported `AA:AA:AA:AA:AA:AA`, and every pairing logged against it:
+
+    sony 0005:054C:0268.0001: BLUETOOTH HID v80.00 Joystick
+        [Sony PLAYSTATION(R)3 Controller] on aa:aa:aa:aa:aa:aa
+
+The obvious diagnosis -- "no address is configured" -- was wrong. The board DT
+has carried `local-bd-address = [49 50 42 00 00 02]` since the panel patch, and
+it is present in the running DTB:
+
+    # od -An -tx1 /proc/device-tree/soc/serial@1c28400/bluetooth/local-bd-address
+     49 50 42 00 00 02
+
+So the property existed and was being ignored. The reason was in the same dmesg
+I had already read past:
+
+    Bluetooth: hci0: BCM: firmware Patch file not found, tried:
+    Bluetooth: hci0: BCM: 'brcm/BCM43430A1.hcd'
+
+`/lib/firmware/brcm/BCM43430A1.hcd` is present on the rootfs -- 30 KB of it. But
+`BT_HCIUART` is built in, so hci_bcm probes at **0.97 s**, and the rootfs is not
+mounted yet. (brcmfmac, which probes over SDIO much later, gets its firmware
+fine at 5.0 s -- the contrast is the tell.) `request_firmware()` fails, and
+`bcm_setup()` takes:
+
+    if (!fw_load_done)
+            return 0;
+
+which sits **eleven lines above** the code that would have made the DT property
+matter:
+
+    if (hci_test_quirk(hu->hdev, HCI_QUIRK_INVALID_BDADDR))
+            hci_set_quirk(hu->hdev, HCI_QUIRK_USE_BDADDR_PROPERTY);
+
+Without the patchram, `btbcm_finalize()` never runs; without it,
+`btbcm_check_bdaddr()` never runs; without that, `HCI_QUIRK_INVALID_BDADDR` is
+never set. `hci_dev_init_sync()` gates the whole DT path on one of those two
+quirks, so `hci_dev_get_bd_addr_from_property()` is never called and the chip
+keeps the BCM43430A1 ROM default.
+
+**The fix** is `0007-bluetooth-hci_bcm-honour-DT-bd-address-without-patchram.patch`:
+set the quirk on the no-patchram path too, guarded by
+`device_property_present()`. The guard is not optional -- setting the quirk with
+no property behind it leaves `public_addr` as `BDADDR_ANY`, which keeps
+`invalid_bdaddr` true and starts the controller `HCI_UNCONFIGURED`, i.e. no
+Bluetooth at all. A wrong address beats no adapter.
+
+Result on hardware, after booting the patched kernel:
+
+    Controller 02:00:00:42:50:49 (public)   Powered: yes
+
+**Why I tested with btmgmt first.** The kernel path calls
+`hdev->set_bdaddr()`, and if that returns an error `hci_dev_init_sync()` returns
+non-zero and the controller disappears entirely. So the open question --
+does the vendor `Write_BD_ADDR` (0xFC01) work on *unpatched* ROM firmware? --
+had to be answered before touching the kernel, because getting it wrong costs
+Bluetooth rather than costing a wrong address. `btmgmt public-addr` exercises
+the same `btbcm_set_bdaddr()` from userspace, where failure is free. It worked,
+which made the kernel patch safe to write.
+
+`btmgmt` is not installed: bluez builds it as a `noinst_PROGRAM`
+(`Makefile.tools:505`), so it exists in the build tree and never reaches the
+target. Copy it from
+`output/build/bluez5_utils-5.79/tools/btmgmt` when needed.
+
+That test did knock Bluetooth out on the live board: setting the address while
+stopping and restarting bluetoothd around it left the controller stuck in
+`HCI_CONFIG` -- `hci0` still in sysfs, but mgmt answering "Invalid Index". The
+address is not persistent (it is re-applied at every adapter open), so a reboot
+restored everything. Worth remembering: `set_public_address` queues a
+`power_on` and re-adds the mgmt index, and racing bluetoothd against that
+sequence loses.
+
+**Consequence for pairing:** the DS3 stores the HOST address and will only
+connect back to it. Changing the adapter address invalidates the existing
+pairing -- the pad must be cable-paired once more. BlueZ's pairing DB is keyed
+by adapter address too, so `/var/lib/bluetooth/AA:AA:AA:AA:AA:AA/` is now dead
+and a fresh `02:00:00:42:50:49/` has taken over.
+
+**Still fixed, not per-board.** Every unit built from this image gets the same
+address. Making it per-board needs the bootloader to write the property (the
+kernel comment literally says "Allow the bootloader to set a valid address
+through the device tree"), or a userspace pass with btmgmt before bluetoothd
+starts. The SoC SID is available as the `Serial` line in `/proc/cpuinfo`
+(`165541530706808b` on this unit) -- note that the DTS comment previously
+pointed at `/sys/bus/soc/devices/soc0/serial_number`, which does not exist on
+this board; that has been corrected.
+
+To read the address on the board, with no extra tools:
+
+    printf 'show\nquit\n' | bluetoothctl
+
+Note `/sys/class/bluetooth/hci0/address` does not exist on this kernel, and
+`hciconfig` is not built.
+
 ### Current state (2026-08-26)
 
-`firmware/sdcard.img` md5 `114a0e11cc315c064b77706a2bd83291`. Board verified
+`firmware/sdcard.img` md5 `339c0641bebefd3b7cca0cde1060ea43`. Board verified
 byte-identical to this image across all 27 checked files plus kernel and DTB, so
 SSH pushes and a fresh flash produce the same system.
 
@@ -3654,7 +3750,8 @@ everywhere including RetroArch's menu, OSD and now the boot console; touch in th
 search keyboard; jump-to-letter with overlay; menu position remembered at both
 levels; PlayStation (user supplies BIOS); GBA at full speed on gpSP; Atari
 800/5200 with a working virtual keyboard; ZX Spectrum with Kempston joystick and
-L1 keyboard overlay; in-game volume hotkeys; speaker via the PH9 amp; boot ~4.9 s.
+L1 keyboard overlay; in-game volume hotkeys; speaker via the PH9 amp; boot ~4.9 s;
+Bluetooth on a real address (02:00:00:42:50:49) rather than the BCM ROM default.
 
 **N64 is solved.** Native 320x240 with rice, `alsathread`, `performance`
 governor, and three core audio patches. 998/1000 emulation speed, no dropouts, no
@@ -3664,7 +3761,7 @@ clipping.
 unpatched:
 - `buildroot-external/package/retroarch/libretro-*/` -- N64 (3), Atari 800 (1)
 - `buildroot-external/board/bpi-m2m/patches/` (BR2_GLOBAL_PATCH_DIR) -- fuse (2),
-  bluez5_utils (1), linux (6), mesa3d (1)
+  bluez5_utils (1), linux (7), mesa3d (1)
 
 Every patch above has been verified to re-apply after a `dirclean`.
 
