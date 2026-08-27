@@ -28,6 +28,36 @@ AC_ONLINE=/sys/class/power_supply/axp22x-ac/online
 CAPPED_FREQ=648000
 CAPPED_BACKLIGHT=80
 
+# Mali-400 ceiling. The DTS makes 432/480/528/600 MHz OPPs available on top of
+# the stock 144/240/384 -- and MEASUREMENT SAYS TO LEAVE THEM ALONE.
+#
+# Mario Kart 64 at 640x480 with rice, 900-frame gameplay window:
+#     384 MHz -> 53.7 fps (89%)
+#     480 MHz -> 54.5 fps (91%)
+#     528 MHz -> 53.7 fps (89%)
+# Flat. Below 384 it scales hard (31.0 / 42.5 / 50.9 fps at 144/240/384), so the
+# GPU is the limiter only up to that point; above it, memory bandwidth is, and
+# core clock does not buy bandwidth. 600 MHz is also outright unstable: ~1970
+# lima faults and a hung RetroArch, with no opp-microvolt and no GPU rail to
+# stabilise it.
+#
+# So this cap stays at stock. Raising it costs risk and returns ~1%.
+# If you raise it anyway, re-measure -- do not trust the OPP list to mean speed.
+GPU_MAX_DCIN=384000000
+#
+# On VBUS the 900 mA budget is already the binding constraint, so the GPU stays
+# at stock regardless of what the DTS offers.
+GPU_MAX_VBUS=384000000
+GPU_DEVFREQ=/sys/class/devfreq/1c40000.gpu
+
+gpu_cap() {
+	[ -w "$GPU_DEVFREQ/max_freq" ] || return 0
+	# min must come down before max, or the write is rejected.
+	echo 144000000 > "$GPU_DEVFREQ/min_freq" 2>/dev/null
+	echo "$1" > "$GPU_DEVFREQ/max_freq" 2>/dev/null
+	echo "Power: GPU capped at $(( $(cat "$GPU_DEVFREQ/max_freq") / 1000000 )) MHz"
+}
+
 start() {
 	if [ "$(cat $AC_ONLINE 2>/dev/null)" = "1" ]; then
 		# On the real supply, pin the governor rather than letting schedutil
@@ -56,6 +86,7 @@ start() {
 			[ -w "$g" ] && echo performance > "$g" 2>/dev/null
 		done
 		echo "$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)"
+		gpu_cap "$GPU_MAX_DCIN"
 		return 0
 	fi
 
@@ -66,6 +97,7 @@ start() {
 	for b in /sys/class/backlight/*/brightness; do
 		[ -w "$b" ] && echo "$CAPPED_BACKLIGHT" > "$b" 2>/dev/null
 	done
+	gpu_cap "$GPU_MAX_VBUS"
 	echo "OK"
 }
 

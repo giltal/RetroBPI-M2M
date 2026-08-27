@@ -47,12 +47,36 @@ start() {
 }
 
 stop() {
+	# Verify the process is ACTUALLY gone rather than trusting the return
+	# code, and never remove the pidfile unless it is. The previous version
+	# did "rm -f $PIDFILE" unconditionally, so a stop that did not take left
+	# the launcher running with no pidfile -- permanently unstoppable through
+	# this script. That happened: the launcher kept DRM master, and every
+	# subsequent RetroArch launch died with
+	#     [KMS]: Error when switching mode
+	#     [Video]: Cannot open video driver.. Exiting..
+	# which looks like a graphics bug and is really a stale process.
 	printf "Stopping %s: " "$DAEMON"
-	start-stop-daemon --stop --quiet --pidfile "$PIDFILE"
-	status=$?
+	[ -f "$PIDFILE" ] && start-stop-daemon --stop --quiet --pidfile "$PIDFILE"
+
+	# Escalate: TERM by name, then KILL. The launcher holds DRM master, so a
+	# survivor is not a cosmetic leak -- nothing else can draw.
+	i=0
+	while pidof "$DAEMON" >/dev/null 2>&1; do
+		i=$((i + 1))
+		[ "$i" -gt 20 ] && break
+		[ "$i" -eq 1 ]  && killall "$DAEMON" 2>/dev/null
+		[ "$i" -eq 10 ] && killall -9 "$DAEMON" 2>/dev/null
+		sleep 1
+	done
+
+	if pidof "$DAEMON" >/dev/null 2>&1; then
+		echo "FAIL (still running)"
+		return 1
+	fi
 	rm -f "$PIDFILE"
-	if [ "$status" -eq 0 ]; then echo "OK"; else echo "FAIL"; fi
-	return "$status"
+	echo "OK"
+	return 0
 }
 
 case "$1" in

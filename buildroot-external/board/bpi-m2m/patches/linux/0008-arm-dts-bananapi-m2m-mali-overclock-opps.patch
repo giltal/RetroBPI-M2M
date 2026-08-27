@@ -1,0 +1,96 @@
+From: RetroBPI_M2M <noreply@example.com>
+Date: Thu, 27 Aug 2026 00:00:00 +0300
+Subject: [PATCH] ARM: dts: bananapi-m2m: add Mali-400 overclock OPPs
+
+The stock A33 mali_opp_table stops at 384 MHz. Mario Kart 64 at 640x480 with
+rice runs at 50.9 fps there -- 85% of full speed -- and a clock sweep shows
+throughput scales strongly with GPU clock (31.0 fps at 144 MHz, 42.5 at 240,
+50.9 at 384), so this resolution is genuinely GPU-limited rather than CPU-bound.
+
+Add 432/480/528/600 MHz OPPs. PLL_GPU is an N/M PLL off osc24M with no ceiling
+in the driver, so each is an exact multiple of 24 MHz.
+
+Adding an OPP only makes a rate available; it does not select it. There is no
+opp-microvolt in this table and the GPU has no separate rail, so this is a
+clock-only overclock with nothing left to stabilise a rate that misbehaves.
+S05powercap therefore caps devfreq max_freq to the rate validated on hardware,
+so an untested OPP is never picked automatically at boot -- a GPU hang there
+would be awkward to recover from on a board with no HDMI.
+
+Signed-off-by: RetroBPI_M2M <noreply@example.com>
+---
+ .../allwinner/sun8i-a33-bananapi-m2m-ws5b.dts | 66 +++++++++++++++++++
+ 1 file changed, 66 insertions(+)
+
+--- a/arch/arm/boot/dts/allwinner/sun8i-a33-bananapi-m2m-ws5b.dts
++++ b/arch/arm/boot/dts/allwinner/sun8i-a33-bananapi-m2m-ws5b.dts
+@@ -199,3 +199,69 @@
+ 		local-bd-address = [49 50 42 00 00 02];
+ 	};
+ };
++
++/*
++ * Mali-400 MP2 overclock.
++ *
++ * Stock OPPs are 144/240/384 MHz. Measured, Mario Kart 64 at 640x480 with rice,
++ * over a 900-frame gameplay window (title screen excluded -- it is not
++ * GPU-bound and hides the effect):
++ *
++ *     144 MHz -> 31.0 fps (52% of 60)
++ *     240 MHz -> 42.5 fps (71%)
++ *     384 MHz -> 50.9 fps (85%)
++ *
++ * MEASURED OUTCOME: OVERCLOCKING DOES NOT HELP. Above 384 MHz the curve is flat:
++ *
++ *     384 MHz -> 53.7 fps (89%)
++ *     480 MHz -> 54.5 fps (91%)
++ *     528 MHz -> 53.7 fps (89%)
++ *
++ * (900-frame window, deltas agreeing to within 1.5%, one session, after a
++ * reboot to clear GPU state.)
++ *
++ * A t = a + b/f fit over the 144/240/384 points predicted 92% at 480 MHz and
++ * 98% at 600. That was wrong. The fit was extrapolating past a wall it could
++ * not see from below: raising the GPU CORE clock does nothing for memory
++ * bandwidth, and on 512 MB of DDR3 shared with the CPU and the display
++ * controller that is what actually binds above ~384 MHz. Strong scaling below
++ * a bottleneck says nothing about what lies above it.
++ *
++ * 600 MHz is additionally UNSTABLE: ~1970 lima faults (pp0/pp1 task error
++ * int_state=0 status=5, gp/pp bus stop timeout) and a hung RetroArch. 432, 480
++ * and 528 each ran clean, so the functional ceiling is between 528 and 600 --
++ * but since none of them are FASTER, that ceiling is of no practical use.
++ *
++ * These OPPs are kept only as the record of a measured negative result.
++ * S05powercap pins the cap at the stock 384 MHz. Do not raise it expecting
++ * speed; it was measured, and it is not there.
++ *
++ * PLL_GPU is an N/M PLL off the 24 MHz oscillator with no ceiling in the
++ * driver, so all of these are exact: 432 = 24*18, 480 = 24*20, 528 = 24*22,
++ * 600 = 24*25.
++ *
++ * THERE IS NO VOLTAGE HEADROOM. The A33 mali_opp_table carries no opp-microvolt
++ * and the GPU runs from a fixed rail, so this is a clock-only overclock: if a
++ * rate is unstable there is no knob left to stabilise it. Adding an OPP here
++ * only makes it AVAILABLE -- S05powercap caps devfreq max_freq to the rate that
++ * has actually been validated on hardware, so an untested OPP is never selected
++ * automatically at boot, where a GPU hang would be hard to recover from.
++ */
++&mali_opp_table {
++	opp-432000000 {
++		opp-hz = /bits/ 64 <432000000>;
++	};
++
++	opp-480000000 {
++		opp-hz = /bits/ 64 <480000000>;
++	};
++
++	opp-528000000 {
++		opp-hz = /bits/ 64 <528000000>;
++	};
++
++	opp-600000000 {
++		opp-hz = /bits/ 64 <600000000>;
++	};
++};
++

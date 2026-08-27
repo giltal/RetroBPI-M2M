@@ -3892,6 +3892,97 @@ the launcher pulls in SDL2, SDL2_image, SDL2_ttf, mesa and fonts, and needs
 ~600 ms of I/O even on an idle system with a cold cache. That is the remaining
 target, not the init sequence.
 
+### Mali overclock: measured, and it does not help
+
+Asked for directly: overclock the Mali-400 to 600 MHz to buy back 640x480. The
+answer is no, on two independent grounds.
+
+**First, the GPU only limits below 384 MHz.** Pinning devfreq to each stock OPP
+and measuring the same 900-frame gameplay window (Mario Kart 64, 640x480, rice):
+
+```
+144 MHz -> 31.0 fps (52%)
+240 MHz -> 42.5 fps (71%)
+384 MHz -> 50.9 fps (85%)
+```
+
+That scales strongly, so 640x480 really is GPU-bound at stock -- the first direct
+evidence for a claim this project had been carrying on inference. Fitting
+`t = a + b/f` gave `a ~= 12.1 ms` of clock-independent work and `b ~= 2906` MHz*ms
+of GPU work, predicting 41.3 fps at 240 against 42.5 measured. On that basis the
+extrapolation said 480 MHz -> 92% and 600 MHz -> 98%.
+
+**The extrapolation was wrong.** With OPPs added and re-measured:
+
+```
+384 MHz -> 53.7 fps (89%)
+480 MHz -> 54.5 fps (91%)
+528 MHz -> 53.7 fps (89%)
+```
+
+Flat, with the three deltas agreeing to within 1.5%. Raising the GPU core clock
+37% buys ~1%. The fit was extrapolating past a wall it could not see from below
+it: core clock does not buy memory bandwidth, and on 512 MB of DDR3 shared with
+four CPUs and the display controller, bandwidth is what binds above ~384 MHz.
+Strong scaling underneath a bottleneck says nothing about what lies above it.
+The upper-bound caveat recorded at the time was right in direction and far too
+generous in size.
+
+**Second, 600 MHz does not run at all.** ~1970 lima faults --
+`pp0/pp1 task error int_state=0 status=5`, `gp bus stop timeout` -- and a hung
+RetroArch. 432, 480 and 528 each ran clean, so the functional ceiling sits
+between 528 and 600, but since none of them are faster that ceiling is useless.
+There is nothing to tune with: the A33 `mali_opp_table` has no `opp-microvolt`
+and lima reports `no regulator (mali) found`, so it is clock-only.
+
+The OPPs are kept as the record of a measured negative result; `S05powercap`
+pins the cap at the stock 384 MHz.
+
+#### A measurement that had to be thrown away
+
+The first escalation run reported 384 MHz at 63.0 fps -- against 50.9 fps for the
+same configuration an hour earlier -- and 432 MHz coming out *slower* than 384.
+Both impossible. The cause was shortening the window from 900 to 600 frames to
+save time: `delta` is the difference of two ~90-100 s runs, so ordinary startup
+and I/O variance swamps a 10 s window. Restoring the 900-frame window produced
+the consistent numbers above. The shorter window was not a smaller measurement,
+it was a different one.
+
+#### Two bugs found on the way
+
+**The launcher was unstoppable.** `S12launcher stop()` ran `rm -f "$PIDFILE"`
+unconditionally, even when the kill failed. Once that happened the launcher kept
+running with no pidfile, every later `stop` failed, and it held DRM master
+forever -- so every RetroArch launch died with `[KMS]: Error when switching mode`
+/ `Cannot open video driver`, which reads like a graphics fault and is really a
+stale process. `stop()` now escalates TERM -> KILL by name and only removes the
+pidfile once `pidof` confirms the process is gone.
+
+That bug also produced a whole sweep of fabricated numbers -- every run failed in
+~1.06 s and the script reported **90000 fps, 150000%**. The benchmarks now abort
+if the launcher survives, and reject any run of thousands of frames that finishes
+implausibly fast. Same lesson as the vacuous `strings` zeros: a failed command is
+not a measurement.
+
+**The board has no thermal protection.** `/sys/class/thermal` held no
+`thermal_zone*` at all, so SoC temperature could not even be read, let alone
+throttled on, on a passively cooled console that runs N64 at ~100% CPU. The DTS
+was never at fault: `sun8i-a33.dtsi` already declares `ths@1c25000` and a full
+`cpu-thermal` zone with trip points and a cooling map onto all four CPUs, and
+both are present in the live DTB. The sensor driver simply never probed.
+
+The obvious fix was the wrong one. `sun8i_thermal.c` looks like the match and is
+already built in, but its compatible list is a83t/h3/r40/a64/a100/h5/h6/d1/h616
+-- no A33. On A33 the sensor is part of the GPADC block and is claimed by
+`drivers/iio/adc/sun4i-gpadc-iio.c`, which is what the node's `#io-channel-cells`
+property was signalling. `CONFIG_SUN4I_GPADC=y` is the fix.
+
+Worth recording how the wrong answer nearly shipped: the first search grepped for
+`SUN8I_THS`, the symbol is `SUN8I_THERMAL`, so it reported "not enabled" for
+something that was already `=y`. The tell was the rebuilt zImage having an
+identical md5 -- adding a driver must change the binary. The build script now
+fails outright if the md5 does not change.
+
 ### Current state (2026-08-26)
 
 `firmware/sdcard.img` md5 `339c0641bebefd3b7cca0cde1060ea43`. Board verified
