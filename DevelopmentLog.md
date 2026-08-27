@@ -3983,9 +3983,54 @@ something that was already `=y`. The tell was the rebuilt zImage having an
 identical md5 -- adding a driver must change the binary. The build script now
 fails outright if the md5 does not change.
 
+### Thermal: the board could not measure its own temperature
+
+`/sys/class/thermal` contained no `thermal_zone*` at all. SoC temperature could
+not be read, and nothing could throttle on it -- on a passively cooled console
+that runs N64 at ~100% CPU for a whole session. The only cooling device present,
+`cpufreq-cpu0`, had no zone driving it.
+
+The DTS was never the problem. `sun8i-a33.dtsi` already declares `ths@1c25000`
+and a full `cpu-thermal` zone with five trip points and a cooling map onto all
+four CPUs, and both are present in the live DTB. The sensor driver simply never
+probed, so the zone had nothing to bind to.
+
+**The obvious driver is the wrong one.** `sun8i_thermal.c` looks like the match
+by name and was already built in, but its compatible list is
+a83t/h3/r40/a64/a100/h5/h6/d1/h616 -- no A33. On A33 the sensor lives in the
+GPADC block and is claimed by `drivers/iio/adc/sun4i-gpadc-iio.c`. The node's
+`#io-channel-cells` property was saying so all along. `CONFIG_SUN4I_GPADC=y`.
+
+Worth recording how the wrong answer nearly shipped. The first search grepped for
+`SUN8I_THS`; the symbol is `SUN8I_THERMAL`, so it reported "not enabled" for
+something already `=y`, and a config change was made that did nothing. The tell
+was the rebuilt zImage having an **identical md5** -- adding a driver has to
+change the binary. The rebuild script now fails outright if the md5 does not
+move, because "the config says y" is not evidence that the artifact contains it.
+
+**First thermal profile ever taken on this board.** Shipping N64 configuration
+(320x240, rice), Mario Kart 64, 3 minutes:
+
+```
+idle 49 C
+  0s 52   40s 55   80s 57   120s 60   160s 61
+ 20s 54   60s 56  100s 59   140s 61   peak 63
+```
+
+Peak 63 C, CPU held at 1.2 GHz throughout, cooling device never engaged, 12 C of
+headroom to the first passive trip at 75 C (critical is 110 C). The curve
+flattens at the end (60 / 61 / 61), so this is near steady state rather than
+still climbing.
+
+12 C is comfortable but not generous, and this was an open board on a desk. In an
+enclosed case or a warm room, 75 C is reachable and passive throttling would
+begin -- which is now a graceful slowdown rather than, as before, nothing at all
+watching. It also reinforces the overclock verdict independently: raising the
+Mali clock would have spent part of that 12 C for a measured ~1%.
+
 ### Current state (2026-08-26)
 
-`firmware/sdcard.img` md5 `339c0641bebefd3b7cca0cde1060ea43`. Board verified
+`firmware/sdcard.img` md5 `3dc66880fd11ae427a0b34bd8457f1b2`. Board verified
 byte-identical to this image across all 27 checked files plus kernel and DTB, so
 SSH pushes and a fresh flash produce the same system.
 
