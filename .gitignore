@@ -25,3 +25,4 @@ backup/*.tar.gz
 # NOTE: buildroot-external/package/retroarch/retroarch/retro-assets IS tracked
 # deliberately -- retroarch.mk:45 copies it into the target, so it is a build
 # input, not an output.
+.syncscratch/
