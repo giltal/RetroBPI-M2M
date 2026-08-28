@@ -3892,6 +3892,39 @@ the launcher pulls in SDL2, SDL2_image, SDL2_ttf, mesa and fonts, and needs
 ~600 ms of I/O even on an idle system with a cold cache. That is the remaining
 target, not the init sequence.
 
+#### Correction: "5.5 s" was kernel-side, not power-on
+
+The boot figures recorded above come from `/proc/uptime`, which starts at KERNEL
+ENTRY. They exclude everything before Linux: SPL, DRAM init, U-Boot proper
+(454 KB), the `bootdelay` wait, reading 6.68 MB of zImage plus the DTB off the SD
+card, and kernel decompress.
+
+Measured on hardware with a stopwatch, power-on to launcher: **8 s**.
+
+```
+power-on -> kernel entry   ~2.5 s   SPL + DRAM + U-Boot + bootdelay + 6.68 MB read
+kernel entry -> UI ready    5.5 s   /proc/uptime based, what this log measured
+                           ------
+total                      ~8 s
+```
+
+So the honest claim is "kernel-to-UI went from ~16 s to 5.5 s", and the user-
+visible boot is ~8 s. The 10.3 s udev fix is real and measured; the total was
+never 5.5 s. This was flagged by the user noticing it "feels much longer" -- a
+reminder that an instrument which starts halfway through the event cannot
+measure the whole of it, and that quoting it as if it did is misleading even when
+every individual number is correct.
+
+Remaining pre-kernel fat, for whenever it is worth taking:
+
+- `CONFIG_BOOTDELAY=1` is a straight second of waiting. Deliberately not 0:
+  interrupting autoboot to boot a different DTB by hand has been the recovery
+  path several times in this project (black screen, bad DTB, unbootable rootfs),
+  and on a board with no HDMI that is worth keeping during bring-up. A one-line
+  change when the device stops needing rescue.
+- The 6.68 MB zImage is read off SD every boot. Shrinking the kernel (or
+  compressing harder) trades CPU for I/O; not measured either way.
+
 ### Mali overclock: measured, and it does not help
 
 Asked for directly: overclock the Mali-400 to 600 MHz to buy back 640x480. The
