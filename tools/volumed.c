@@ -241,6 +241,13 @@ int main(void)
 		 * which is how this pairing was lost twice. */
 		if (pad_seen_at && time(NULL) - pad_seen_at >= 3) {
 			sync();
+			/* The pad just connected, so it is paired. Mark it trusted:
+			 * an untrusted device asks the agent for authorisation on
+			 * every reconnect, and a missed prompt makes bluetoothd
+			 * DELETE the device, link key and all. That is what lost
+			 * this pairing three times. Cheap and idempotent. */
+			if (system("/usr/sbin/bt-trust-paired") == -1)
+				;
 			pad_seen_at = 0;
 		}
 	}

@@ -19,6 +19,11 @@ if strings "$T/usr/bin/volumed" | grep -q "/opt/roms/_system/state.txt"; then ok
 if strings "$T/usr/bin/volumed" | grep -q "Headphone Playback Volume"; then ok "volumed drives the same control"; else bad "volumed control mismatch"; fi
 echo "=== fresh-flash default is not deafening ==="
 if grep -q "g_volume = 40" /mnt/c/BananaPi_Projects/RetroBPI_M2M/launcher/launcher.c; then ok "launcher default 40% (was 80%)"; else bad "default not lowered"; fi
+echo "=== BT trust fix (three lost pairings) ==="
+if [ -x "$T/usr/sbin/bt-trust-paired" ]; then ok "bt-trust-paired present"; else bad "bt-trust-paired missing"; fi
+if grep -q "var/lib/bluetooth" "$T/usr/sbin/bt-trust-paired"; then ok "enumerates bond dirs (paired-devices is empty for this pad)"; else bad "still uses paired-devices - would trust nothing"; fi
+if grep -q "bt-trust-paired" "$T/etc/init.d/S41btagent"; then ok "S41btagent trusts at boot"; else bad "S41btagent does not trust"; fi
+if strings "$T/usr/bin/volumed" | grep -q "bt-trust-paired"; then ok "volumed trusts on pad connect"; else bad "volumed missing trust call"; fi
 echo "=== everything else still intact ==="
 [ "$(md5sum $T/boot/zImage | cut -d' ' -f1)" = "a6ab2523a5e8dd0052c40ef069e8ed6f" ] && ok "thermal kernel" || bad "kernel changed"
 grep -q '^GPU_MAX_DCIN=384000000' "$T/etc/init.d/S05powercap" && ok "GPU at stock" || bad "GPU cap"

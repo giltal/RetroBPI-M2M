@@ -29,6 +29,12 @@ start() {
 		   while true; do echo "yes"; sleep 2; done; } \
 		 | bluetoothctl >> '"$LOGFILE"' 2>&1'
 	status=$?
+	# Trust whatever is already paired. An untrusted device asks this agent
+	# for authorisation on every reconnect, and a prompt that misses the
+	# agent gets answered negatively -- at which point bluetoothd REMOVES the
+	# device and the pairing is gone. That cost three cable re-pairings
+	# before it was identified. Trusted devices never consult the agent.
+	( sleep 5; /usr/sbin/bt-trust-paired ) >/dev/null 2>&1 &
 	if [ "$status" -eq 0 ]; then echo "OK"; else echo "FAIL"; fi
 	return "$status"
 }

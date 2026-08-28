@@ -4156,9 +4156,76 @@ BEFORE starting the launcher proves nothing, because the launcher immediately
 re-applies its stored value. Only changing it while the launcher is already
 running exercises the real path.
 
+### The gamepad kept unpairing: three losses, two wrong explanations, one quirk
+
+The DS3 pairing vanished three times. Each time it needed a cable re-pair, which
+is not something a user should ever have to do twice, let alone three times.
+
+#### Two explanations that were wrong
+
+**"The bond write is not being flushed."** Plausible: the boot after each loss
+logged `EXT4-fs: recovery required`, and nothing handled `KEY_POWER`, so the only
+way to switch the console off was holding the button until the PMIC cut the rail.
+That IS a real bug and the fix is worth keeping -- `volumed` now handles the power
+key, `rcK` runs to completion in 4.6 s and ext4 shuts down clean. But it was not
+this bug: the third loss happened on a boot reporting `recovery required: 0`.
+
+**"Something wipes /var/lib/bluetooth."** Refuted by experiment rather than
+argument. A plain file and a FAKE bond directory of the same shape were planted
+beside the real one and the board power-cycled:
+
+```
+marker.txt          : SURVIVED
+fake bond dir       : SURVIVED
+fake bond info file : SURVIVED
+real bond           : GONE
+```
+
+The filesystem keeps everything it is given. Something was deleting that one
+device deliberately.
+
+#### The actual cause
+
+```
+Paired:  no        Trusted: no        Connected: yes
+```
+
+**BlueZ never marks a sixaxis cable-paired DS3 as "Paired".** The plugin writes
+the link key straight into `/var/lib/bluetooth/<adapter>/<mac>/info`, but as far
+as bluez is concerned the pad is merely connected and untrusted -- which is its
+definition of a TEMPORARY device.
+
+A temporary device must authorise every service connection through the agent, and
+the agent here is a `bluetoothctl` loop echoing "yes" every 2 seconds. A prompt
+landing between echoes goes unanswered, bluetoothd reads that as a refusal, and
+does exactly what S41btagent's own comment said it does:
+
+    agent_auth_cb() Agent replied negatively, removing temporary device
+
+Removing the device takes the link key with it. Three losses, one mechanism, and
+the failure mode was documented in our own tree the whole time -- it just was not
+connected to this symptom.
+
+A trusted device is authorised automatically and never consults the agent, so
+there is no prompt to miss.
+
+#### The obvious implementation does nothing
+
+The first `bt-trust-paired` iterated `bluetoothctl paired-devices`. For this pad
+that list is EMPTY -- `Paired: no` -- so the script ran, exited 0, and trusted
+nothing. It now enumerates bond directories on disk, which exist regardless of
+what bluez thinks "paired" means, and skips any already carrying `Trusted=true`.
+
+Tested by flipping `Trusted=true` back to `false` and re-running: restored. A
+script that reports success while doing nothing is the same class of mistake as
+the vacuous `strings` zeros and the 90000 fps benchmark.
+
+Applied in three places so a pairing cannot sit untrusted long enough to be
+caught: `S41btagent` at boot, `volumed` when the pad connects, and by hand.
+
 ### Current state (2026-08-26)
 
-`firmware/sdcard.img` md5 `0f1f97223def44673e84e3b1556240ea`. Board verified
+`firmware/sdcard.img` md5 `3db0fad0cebeb3a2878da3a98dd1470c`. Board verified
 byte-identical to this image across all 27 checked files plus kernel and DTB, so
 SSH pushes and a fresh flash produce the same system.
 
