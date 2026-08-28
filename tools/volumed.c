@@ -46,11 +46,20 @@
 
 #define PAD_NAME    "Sony PLAYSTATION(R)3 Controller"
 #define PEK_NAME    "axp20x-pek"
-#define MIXER       "Headphone"
-#define VOL_MIN     10
-#define VOL_MAX     100
-#define VOL_STEP    5
-#define STORE_DELAY 5
+#define STATE_FILE  "/opt/roms/_system/state.txt"
+
+/* The launcher owns this control and uses its own scale, so volumed MUST use
+ * the identical mapping or the two will disagree and fight:
+ *     idx = (VOL_INDEX_MAX - VOL_SPAN_DB) + pct * VOL_SPAN_DB / 100
+ * index 0..63 is -63..0 dB in 1 dB steps, and index 0 is a hard MUTE. Only the
+ * top 40 dB is usable: the speaker breakout drives its amplifier through 100 K
+ * series resistors, so below that it ticks rather than plays. */
+#define VOL_INDEX_MAX 63
+#define VOL_SPAN_DB   40
+#define VOL_MIN_PCT   10   /* never silently mute: that looks broken, not quiet */
+#define VOL_MAX_PCT   100
+#define VOL_STEP      5
+#define STORE_DELAY   5
 
 static int open_by_name(const char *want)
 {
@@ -68,7 +77,7 @@ static int open_by_name(const char *want)
 		if ((fd = open(path, O_RDONLY | O_NONBLOCK)) < 0)
 			continue;
 		name[0] = 0;
-		/* exact match: "...Controller" must not also catch
+		/* exact match, so "...Controller" does not also catch
 		 * "...Controller Motion Sensors" */
 		if (ioctl(fd, EVIOCGNAME(sizeof name), name) >= 0 && !strcmp(name, want)) {
 			closedir(d);
@@ -80,38 +89,82 @@ static int open_by_name(const char *want)
 	return -1;
 }
 
-static int cur_volume(void)
+static int volume_pct(void)		/* read the mixer, in launcher percent */
 {
-	FILE *p = popen("amixer sget " MIXER " 2>/dev/null | "
-	                "grep -o '\[[0-9]*%\]' | head -1 | tr -dc '0-9'", "r");
-	int v = -1;
-	if (p) {
-		if (fscanf(p, "%d", &v) != 1)
-			v = -1;
-		pclose(p);
+	FILE *p = popen("amixer -c 0 cget name='Headphone Playback Volume' 2>/dev/null"
+	                " | sed -n 's/.*: values=\\([0-9]*\\).*/\\1/p' | head -1", "r");
+	int idx = -1, pct;
+
+	if (!p)
+		return -1;
+	if (fscanf(p, "%d", &idx) != 1)
+		idx = -1;
+	pclose(p);
+	if (idx < 0)
+		return -1;
+	pct = ((idx - (VOL_INDEX_MAX - VOL_SPAN_DB)) * 100) / VOL_SPAN_DB;
+	if (pct < 0)   pct = 0;
+	if (pct > 100) pct = 100;
+	return pct;
+}
+
+/* Persist through the launcher's own state file, so the value survives a
+ * reboot. The launcher applies volume=<pct> at startup; without this it would
+ * re-apply its stale stored level and undo whatever was set during a game. */
+static void state_write(int pct)
+{
+	char tmp[] = "/opt/roms/_system/.state.tmp";
+	char line[256];
+	FILE *in, *out;
+	int wrote = 0;
+
+	out = fopen(tmp, "w");
+	if (!out)
+		return;
+	in = fopen(STATE_FILE, "r");
+	if (in) {
+		while (fgets(line, sizeof line, in)) {
+			if (!strncmp(line, "volume=", 7)) {
+				fprintf(out, "volume=%d\n", pct);
+				wrote = 1;
+			} else {
+				fputs(line, out);
+			}
+		}
+		fclose(in);
 	}
-	return v;
+	if (!wrote)
+		fprintf(out, "volume=%d\n", pct);
+	fclose(out);
+	/* rename is atomic: a power cut mid-write must not truncate the file the
+	 * launcher reads at every boot. */
+	rename(tmp, STATE_FILE);
+	sync();
 }
 
 static void adjust_volume(int up)
 {
-	char cmd[128];
-	int v = cur_volume(), t;
+	char cmd[192];
+	int v = volume_pct(), t, idx;
 
 	if (v < 0)
 		return;
 	t = up ? v + VOL_STEP : v - VOL_STEP;
-	if (t > VOL_MAX) t = VOL_MAX;
-	/* Clamp instead of walking to 0%: a console that has silently muted
-	 * itself looks broken, not quiet. */
-	if (t < VOL_MIN) t = VOL_MIN;
+	if (t > VOL_MAX_PCT) t = VOL_MAX_PCT;
+	if (t < VOL_MIN_PCT) t = VOL_MIN_PCT;
 	if (t == v)
 		return;
-	snprintf(cmd, sizeof cmd, "amixer -q sset " MIXER " %d%% >/dev/null 2>&1", t);
+
+	idx = (VOL_INDEX_MAX - VOL_SPAN_DB) + (t * VOL_SPAN_DB) / 100;
+	if (idx < 0)             idx = 0;
+	if (idx > VOL_INDEX_MAX) idx = VOL_INDEX_MAX;
+	snprintf(cmd, sizeof cmd,
+	         "amixer -c 0 cset name='Headphone Playback Switch' on >/dev/null 2>&1; "
+	         "amixer -c 0 cset name='Headphone Playback Volume' %d >/dev/null 2>&1", idx);
 	if (system(cmd) == -1)
 		return;
+	state_write(t);
 }
-
 static void power_off(void)
 {
 	/* Flush before asking init to stop anything. The whole point of handling

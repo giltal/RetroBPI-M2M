@@ -190,7 +190,13 @@ static const Theme g_themes[] = {
 #define NUM_THEMES (sizeof(g_themes) / sizeof(g_themes[0]))
 
 static int g_current_theme = 0;
-static int g_volume = 80;  /* 0-100%; see volume_apply() for the mapping */
+static int g_volume = 40;  /* 0-100%; see volume_apply() for the mapping.
+                            * Was 80, which is uncomfortably loud on a fresh
+                            * card: game audio is mastered near full scale,
+                            * unlike the menu, and the speaker amp adds gain
+                            * on top. Measured in practice, ~25-40% is a
+                            * normal listening level. Only applies when there
+                            * is no saved state.txt to override it. */
 
 /* Active theme colors (updated when theme changes) */
 static pixel_t COL_BG;
@@ -1689,6 +1695,7 @@ static void menu_load_recents(void)
  * ========================================================================= */
 
 static void volume_apply(int pct);
+static int volume_query(void);
 
 static void state_save(void)
 {
@@ -1700,7 +1707,8 @@ static void state_save(void)
     fprintf(f, "selected=%d\n", g_menu.selected);
     fprintf(f, "scroll=%d\n", g_menu.scroll_top);
     fprintf(f, "theme=%d\n", g_current_theme);
-    fprintf(f, "volume=%d\n", g_volume);
+    /* Mixer, not g_volume -- volumed may have changed it in-game. */
+    fprintf(f, "volume=%d\n", volume_query());
     fclose(f);
 }
 
@@ -1913,6 +1921,35 @@ static void volume_apply(int pct)
              "amixer -c 0 cset name='Headphone Playback Volume' %d"
              " >/dev/null 2>&1", idx);
     system(cmd);
+}
+
+/*
+ * Read the volume back OUT of the mixer, as a percentage on the same scale
+ * volume_apply() uses.
+ *
+ * Needed because the launcher is no longer the only thing that moves this
+ * control: volumed (S45volumed) handles PS + d-pad while a GAME is running,
+ * where the launcher's Settings menu is unreachable. Persisting g_volume in
+ * that case would write back a stale in-memory value and silently undo what
+ * the player just set -- the same 'volume never sticks' complaint, one layer
+ * further down. So the mixer is the single source of truth at save time.
+ */
+static int volume_query(void)
+{
+    FILE *p = popen("amixer -c 0 cget name='Headphone Playback Volume' 2>/dev/null"
+                    " | sed -n 's/.*: values=\\([0-9]*\\).*/\\1/p' | head -1", "r");
+    int idx = -1, pct;
+
+    if (!p) return g_volume;
+    if (fscanf(p, "%d", &idx) != 1) idx = -1;
+    pclose(p);
+    if (idx < 0) return g_volume;          /* unreadable: keep what we had */
+
+    /* Inverse of volume_apply(): idx = (MAX - SPAN) + pct * SPAN / 100 */
+    pct = ((idx - (VOL_INDEX_MAX - VOL_SPAN_DB)) * 100) / VOL_SPAN_DB;
+    if (pct < 0)   pct = 0;
+    if (pct > 100) pct = 100;
+    return pct;
 }
 
 static void menu_load_settings(void)

@@ -4093,9 +4093,72 @@ Remaining exposure: pulling the plug still loses whatever ext4 has not committed
 Mounting with `commit=1` would narrow that at the cost of SD wear; not done,
 because a working power button addresses the case that actually occurs.
 
+#### In-game volume: verified working, and it was never a reset bug
+
+Reported as "volume is saved after reboot, but going into a game starts loud".
+Measured with a game running, launched normally through the launcher:
+
+```
+mixer idx before / during / after a game : 43 / 43 / 43
+DAC 160, AIF1 DA0 160 (both unity), switch on,on
+per-core audio_volume overrides          : Atari800 only (+8 dB, deliberate)
+global audio_volume                      : unset -> 0.0 dB
+```
+
+Nothing resets the mixer on launch. The setting WAS being applied; game audio is
+simply mastered near full scale where the launcher's menu is not, so the same
+-20 dB that is comfortable in the menu is loud in a game.
+
+Then the in-game control itself, sampled while the player held PS + d-pad down:
+
+```
+t=3s   idx=43  state=50
+t=18s  idx=39  state=40
+t=21s  idx=35  state=30
+t=30s  idx=33  state=25
+```
+
+Mixer and `state.txt` moving in lockstep -- volumed sees the pad alongside
+RetroArch, uses the launcher's exact index scale, and persists every step.
+
+The real defect was the DEFAULT: the launcher shipped `g_volume = 80`, so a fresh
+card starts uncomfortably loud. Lowered to 40; measured practice is that 25-40%
+is a normal listening level on this hardware.
+
+#### Volume ownership: the first fix was at the wrong layer
+
+The initial version had volumed writing raw ALSA percentages via `amixer sset
+Headphone`. That worked in-session -- and was silently undone on the next boot,
+because **the launcher owns this control**. It keeps `volume=` in
+`/opt/roms/_system/state.txt` and re-applies it at startup on its own scale:
+
+```
+idx = (VOL_INDEX_MAX - VOL_SPAN_DB) + pct * VOL_SPAN_DB / 100   =  23 + pct*0.4
+```
+
+index 0..63 spanning -63..0 dB, index 0 a hard mute, and only the top 40 dB
+usable because the speaker breakout drives its amplifier through 100 K series
+resistors -- below that it ticks rather than plays. So two writers were using two
+different scales on one control.
+
+`alsactl` was blamed first and was innocent: it had stored and restored 70%
+faithfully, and the launcher overwrote it afterwards. Worth remembering -- the
+component that shows the wrong value is not necessarily the one that wrote it.
+
+Now: volumed uses the identical mapping and updates `state.txt` atomically
+(temp + `rename` + `sync`, so a power cut cannot truncate the file the launcher
+reads at every boot), and the launcher's `state_save()` persists
+`volume_query()` -- read back from the mixer -- instead of its stale in-memory
+`g_volume`, which would otherwise undo an in-game change.
+
+One verification of mine was invalid and had to be redone: setting the mixer
+BEFORE starting the launcher proves nothing, because the launcher immediately
+re-applies its stored value. Only changing it while the launcher is already
+running exercises the real path.
+
 ### Current state (2026-08-26)
 
-`firmware/sdcard.img` md5 `d5ffd5e89244739a5d64125882049da3`. Board verified
+`firmware/sdcard.img` md5 `0f1f97223def44673e84e3b1556240ea`. Board verified
 byte-identical to this image across all 27 checked files plus kernel and DTB, so
 SSH pushes and a fresh flash produce the same system.
 

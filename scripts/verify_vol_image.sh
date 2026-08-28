@@ -12,6 +12,13 @@ echo "=== init script ==="
 echo "=== RetroArch must NOT also bind volume (would double-apply) ==="
 grep -qE '^[[:space:]]*input_volume' "$T/root/.config/retroarch/retroarch.cfg" \
   && bad "retroarch.cfg still binds volume" || ok "no active volume bindings"
+echo "=== launcher persists the MIXER value, not its stale copy ==="
+if strings "$T/usr/bin/retrobpi_launcher" | grep -q "Headphone Playback Volume. 2>/dev/null"; then ok "launcher queries the mixer at save time"; else bad "launcher still saves g_volume"; fi
+echo "=== volumed uses the launcher scale and its state file ==="
+if strings "$T/usr/bin/volumed" | grep -q "/opt/roms/_system/state.txt"; then ok "volumed persists through state.txt"; else bad "volumed does not write state.txt"; fi
+if strings "$T/usr/bin/volumed" | grep -q "Headphone Playback Volume"; then ok "volumed drives the same control"; else bad "volumed control mismatch"; fi
+echo "=== fresh-flash default is not deafening ==="
+if grep -q "g_volume = 40" /mnt/c/BananaPi_Projects/RetroBPI_M2M/launcher/launcher.c; then ok "launcher default 40% (was 80%)"; else bad "default not lowered"; fi
 echo "=== everything else still intact ==="
 [ "$(md5sum $T/boot/zImage | cut -d' ' -f1)" = "a6ab2523a5e8dd0052c40ef069e8ed6f" ] && ok "thermal kernel" || bad "kernel changed"
 grep -q '^GPU_MAX_DCIN=384000000' "$T/etc/init.d/S05powercap" && ok "GPU at stock" || bad "GPU cap"
