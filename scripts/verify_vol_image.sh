@@ -24,6 +24,8 @@ if [ -x "$T/usr/sbin/bt-trust-paired" ]; then ok "bt-trust-paired present"; else
 if grep -q "var/lib/bluetooth" "$T/usr/sbin/bt-trust-paired"; then ok "enumerates bond dirs (paired-devices is empty for this pad)"; else bad "still uses paired-devices - would trust nothing"; fi
 if grep -q "bt-trust-paired" "$T/etc/init.d/S41btagent"; then ok "S41btagent trusts at boot"; else bad "S41btagent does not trust"; fi
 if strings "$T/usr/bin/volumed" | grep -q "bt-trust-paired"; then ok "volumed trusts on pad connect"; else bad "volumed missing trust call"; fi
+echo "=== fsck for the FAT ROM partition ==="
+if [ -x "$T/sbin/fsck.fat" ]; then ok "fsck.fat present (dosfstools installs nothing without a sub-option)"; else bad "fsck.fat missing - FAT damage would be undiagnosable on-board"; fi
 echo "=== everything else still intact ==="
 [ "$(md5sum $T/boot/zImage | cut -d' ' -f1)" = "a6ab2523a5e8dd0052c40ef069e8ed6f" ] && ok "thermal kernel" || bad "kernel changed"
 grep -q '^GPU_MAX_DCIN=384000000' "$T/etc/init.d/S05powercap" && ok "GPU at stock" || bad "GPU cap"

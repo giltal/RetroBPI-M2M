@@ -4223,9 +4223,50 @@ the vacuous `strings` zeros and the 90000 fps benchmark.
 Applied in three places so a pairing cannot sit untrusted long enough to be
 caught: `S41btagent` at boot, `volumed` when the pad connects, and by hand.
 
+#### The ROM partition had a stuck dirty flag, and no tool to clear it
+
+Every boot logged:
+
+```
+FAT-fs (mmcblk0p2): Volume was not properly unmounted. Some data may be corrupt.
+```
+
+even on boots where ext4 shut down cleanly. The flag was NOT being set fresh each
+shutdown -- it survived a clean unmount and remount, which is the tell: the FAT
+dirty bit is only cleared by fsck, so once set by the earlier unclean power-offs
+it stayed set forever.
+
+That matters more than a stray warning. `/opt/roms` is where the ROMs live and
+where the launcher keeps `_system/state.txt` -- the saved volume and menu
+position. With the bit permanently on, a genuine future unclean unmount would
+look exactly like the stale one, so the warning had stopped carrying information.
+
+**`BR2_PACKAGE_DOSFSTOOLS=y` was already in the defconfig and installed nothing.**
+dosfstools ships no binaries without a sub-option, and none were set -- so the
+target had `e2fsck` for the rootfs and no fsck for FAT at all. Enabled
+`BR2_PACKAGE_DOSFSTOOLS_FSCK_FAT=y`.
+
+Running it found two things:
+
+```
+Dirty bit is set. Fs was not properly unmounted and some data may be corrupt.
+ Automatically removing dirty bit.
+Free cluster summary wrong (1508912 vs. really 943047)
+ Auto-correcting.
+```
+
+The free-cluster count was wrong by 565865 clusters -- real damage from the
+power cuts, not just a flag. Repaired; 1599 files intact, 1547 ROMs still
+present, state.txt readable.
+
+Verified cleared the only way that means anything: unmount, remount, and confirm
+no NEW warning appears (count stayed at 3), then `fsck -n` reporting no dirty
+bit. Trusting the repair message alone would not have distinguished "fixed" from
+"reported fixed".
+
 ### Current state (2026-08-26)
 
-`firmware/sdcard.img` md5 `3db0fad0cebeb3a2878da3a98dd1470c`. Board verified
+`firmware/sdcard.img` md5 `c6e1efba8d4147dbbd3a0ecd932323be`. Board verified
 byte-identical to this image across all 27 checked files plus kernel and DTB, so
 SSH pushes and a fresh flash produce the same system.
 

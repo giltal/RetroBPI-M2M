@@ -113,6 +113,15 @@ BR2_PACKAGE_DTC_PROGRAMS=y
 # Filesystem tools
 BR2_PACKAGE_E2FSPROGS=y
 BR2_PACKAGE_DOSFSTOOLS=y
+# dosfstools installs NOTHING without a sub-option -- the package was already
+# enabled here and yet the target had no fsck.fat at all, which is why a stale
+# FAT dirty flag on /opt/roms could not be cleared on the board.
+#
+# /opt/roms holds the ROMs and _system/state.txt (the launcher's saved volume
+# and menu position). The flag survives a clean unmount/remount -- only fsck
+# clears it -- so leaving it set makes the dirty bit permanently ON and useless
+# as a warning: a genuine future unclean unmount would look identical.
+BR2_PACKAGE_DOSFSTOOLS_FSCK_FAT=y
 
 # --- Launcher -----------------------------------------------------------
 # Pulls in SDL2 / SDL2_ttf / SDL2_image / freetype / libdrm.
