@@ -1538,6 +1538,59 @@ static void favorites_toggle(const char *path)
 }
 
 /* Build a menu from the favorites list */
+/*
+ * Derive the system index from a ROM path.
+ *
+ * Recents and Favorites store bare paths, so unlike the browser (which already
+ * knows which system directory it is in) they must work the system out again.
+ * Both used to do it with:
+ *
+ *     if (strstr(path, g_systems[s].dir_name))
+ *
+ * which is case-SENSITIVE, and the ROM partition is vfat mounted
+ * shortname=mixed, so directory case is whatever the user created. The N64
+ * folder is /opt/roms/N64 while the table says "n64" -- no match, system_idx
+ * stayed -1, and the launch path is guarded by `if (e->system_idx >= 0)`, so
+ * pressing A on an N64 game in Recents did NOTHING AT ALL. Silently. Atari and
+ * MAME worked purely because those folders happen to be lowercase.
+ *
+ * The directory scanner already had this right (strcasecmp against d_name),
+ * which is exactly why browsing worked and Recents did not.
+ *
+ * Matching the PATH COMPONENT rather than any substring also removes a second
+ * hazard: "gb" is a substring of plenty of paths, and first-match-wins would
+ * happily assign the wrong core.
+ */
+static int system_from_path(const char *path)
+{
+    const char *p = path;
+    const char *slash;
+    char dir[MAX_NAME];
+    size_t n, bl = strlen(ROMS_PATH);
+
+    if (strncmp(path, ROMS_PATH, bl) == 0) {
+        p = path + bl;
+        while (*p == '/')
+            p++;
+    } else {
+        return -1;                      /* not under the ROM tree */
+    }
+
+    slash = strchr(p, '/');
+    if (!slash)
+        return -1;                      /* file sitting directly in /opt/roms */
+    n = (size_t)(slash - p);
+    if (n >= sizeof dir)
+        n = sizeof dir - 1;
+    memcpy(dir, p, n);
+    dir[n] = '\0';
+
+    for (int s = 0; g_systems[s].dir_name; s++)
+        if (strcasecmp(dir, g_systems[s].dir_name) == 0)
+            return s;
+    return -1;
+}
+
 static void menu_load_favorites(void)
 {
     g_menu.mode = MENU_FAVORITES;
@@ -1567,13 +1620,7 @@ static void menu_load_favorites(void)
         }
 
         /* Find system index from path */
-        e->system_idx = -1;
-        for (int s = 0; g_systems[s].dir_name; s++) {
-            if (strstr(path, g_systems[s].dir_name)) {
-                e->system_idx = s;
-                break;
-            }
-        }
+        e->system_idx = system_from_path(path);
 
         /* Append system name in parentheses */
         if (e->system_idx >= 0) {
@@ -1668,13 +1715,7 @@ static void menu_load_recents(void)
             clean_display_name(fname, e->name, MAX_NAME);
         }
 
-        e->system_idx = -1;
-        for (int s = 0; g_systems[s].dir_name; s++) {
-            if (strstr(path, g_systems[s].dir_name)) {
-                e->system_idx = s;
-                break;
-            }
-        }
+        e->system_idx = system_from_path(path);
 
         /* Append system name in parentheses */
         if (e->system_idx >= 0) {
@@ -1853,6 +1894,7 @@ static bool menu_jump_letter(int dir)
 typedef enum {
     SETTING_THEME,
     SETTING_VOLUME,
+    SETTING_N64_QUALITY,
     SETTING_FAVORITES,
     SETTING_RECENTS,
     SETTING_CLEAR_RECENTS,
@@ -1862,6 +1904,7 @@ typedef enum {
 static const char *setting_names[] = {
     "Color Theme",
     "Volume",
+    "N64 Quality",
     "View Favorites",
     "Recently Played",
     "Clear Recent",
@@ -1950,6 +1993,45 @@ static int volume_query(void)
     if (pct < 0)   pct = 0;
     if (pct > 100) pct = 100;
     return pct;
+}
+
+/*
+ * N64 quality toggle: 320x240 at the stock 384 MHz GPU, or 640x480 with the
+ * Mali at 528 MHz.
+ *
+ * Measured, Mario Kart 64, time to a fixed frame count minus startup:
+ *     320x240 -> 71.4 fps (119%)     480x360 -> 54.8 fps (91%)
+ *     400x300 -> 55.1 fps  (92%)     640x480 -> 54.8 fps (91%)
+ *
+ * Above native, resolution is FREE -- 2.6x the pixels from 400x300 to 640x480
+ * costs nothing measurable -- so there is no useful middle setting. The limit
+ * is the geometry processor, not fill rate: pixel count does not matter but GPU
+ * clock does (31.0 / 42.5 / 50.9 fps at 144 / 240 / 384 MHz). Hence exactly two
+ * choices, and 528 MHz on the slow one to claw back ~3.5%.
+ *
+ * NO SEPARATE COPY OF THIS STATE IS KEPT. The .opt file is the single source of
+ * truth and is read back each time. Keeping a duplicate in state.txt is what
+ * made the volume setting silently revert -- two writers, two scales, one
+ * control -- and that mistake is not worth repeating here.
+ */
+static int n64_hires_get(void)
+{
+    FILE *p = popen("grep -c \"^parallel-n64-screensize = \\\"640x480\\\"\" '/root/.config/retroarch/config/ParaLLEl N64/ParaLLEl N64.opt' 2>/dev/null", "r");
+    int n = 0;
+
+    if (!p) return 0;
+    if (fscanf(p, "%d", &n) != 1) n = 0;
+    pclose(p);
+    return n > 0;
+}
+
+static void n64_hires_set(int on)
+{
+    /* The shell helper owns both halves of the change -- the core's .opt and
+     * S05powercap's GPU_MAX_DCIN -- so the two cannot drift apart. */
+    if (system(on ? "/usr/sbin/n64-hires on >/dev/null 2>&1"
+                  : "/usr/sbin/n64-hires off >/dev/null 2>&1") == -1)
+        ;
 }
 
 static void menu_load_settings(void)
@@ -2125,6 +2207,8 @@ static void ui_draw_list(void)
             } else if (idx == SETTING_VOLUME) {
                 snprintf(val_buf, sizeof(val_buf), "%d%%", g_volume);
                 val_str = val_buf;
+            } else if (idx == SETTING_N64_QUALITY) {
+                val_str = n64_hires_get() ? "640x480 (OC)" : "320x240";
             } else if (idx == SETTING_CLEAR_RECENTS) {
                 snprintf(val_buf, sizeof(val_buf), "%d items", g_recents_count);
                 val_str = val_buf;
@@ -3049,6 +3133,9 @@ int main(int argc, char *argv[])
                         volume_apply(g_volume + 10);
                         state_save();
                         dirty = 1;
+                    } else if (sel == SETTING_N64_QUALITY) {
+                        n64_hires_set(!n64_hires_get());
+                        dirty = 1;
                     } else if (sel == SETTING_FAVORITES) {
                         menu_load_favorites();
                         dirty = 1;
@@ -3116,6 +3203,12 @@ int main(int argc, char *argv[])
                 g_current_theme = (g_current_theme + 1) % NUM_THEMES;
                 theme_apply(g_current_theme);
                 state_save();
+                dirty = 1;
+            }
+        }
+        if (g_menu.mode == MENU_SETTINGS && g_menu.selected == SETTING_N64_QUALITY) {
+            if (g_input.pressed & (BTN_LEFT_MASK | BTN_RIGHT_MASK)) {
+                n64_hires_set(!n64_hires_get());
                 dirty = 1;
             }
         }

@@ -26,6 +26,26 @@ if grep -q "bt-trust-paired" "$T/etc/init.d/S41btagent"; then ok "S41btagent tru
 if strings "$T/usr/bin/volumed" | grep -q "bt-trust-paired"; then ok "volumed trusts on pad connect"; else bad "volumed missing trust call"; fi
 echo "=== fsck for the FAT ROM partition ==="
 if [ -x "$T/sbin/fsck.fat" ]; then ok "fsck.fat present (dosfstools installs nothing without a sub-option)"; else bad "fsck.fat missing - FAT damage would be undiagnosable on-board"; fi
+echo "=== N64 quality toggle + Settings item ==="
+if [ -x "$T/usr/sbin/n64-hires" ]; then ok "n64-hires helper present"; else bad "n64-hires missing"; fi
+if strings "$T/usr/bin/retrobpi_launcher" | grep -q "N64 Quality"; then ok "Settings item compiled in"; else bad "Settings item missing"; fi
+if grep -q "^GPU_MAX_DCIN=384000000" "$T/etc/init.d/S05powercap"; then ok "image defaults to stock 384 MHz (toggle is opt-in)"; else bad "image ships the overclock as default"; fi
+if grep -q 'screensize = "320x240"' "$T/root/.config/retroarch/config/ParaLLEl N64/ParaLLEl N64.opt"; then ok "image defaults to 320x240"; else bad "image ships 640x480 as default"; fi
+echo "=== Recents/Favorites case-insensitive system match ==="
+# NOTE: this one cannot be checked at the binary level. system_from_path() is a
+# static function with no string literal of its own, so it leaves no symbol and
+# no strings match -- the first version of this check grepped for a C COMMENT,
+# which of course never survives compilation, and failed a perfectly good image.
+# So: assert the source carries no active strstr matcher, and that the binary is
+# newer than the source it came from. The behavioural confirmation is the
+# on-hardware test (N64 launching from Recents), not this script.
+L=/mnt/c/BananaPi_Projects/RetroBPI_M2M/launcher/launcher.c
+n=$(grep -cE "^[[:space:]]*(if )?\(?strstr\(path, g_systems" "$L" || true)
+if [ "$n" = "0" ]; then ok "no active strstr system matcher in the source"; else bad "$n active strstr matcher(s) remain"; fi
+if [ "$T/usr/bin/retrobpi_launcher" -nt "$L" ]; then ok "launcher binary newer than launcher.c"; else bad "launcher binary is STALE relative to its source"; fi
+echo "=== analog stick as d-pad on 2D cores ==="
+if grep -q '^input_player1_analog_dpad_mode = "1"' "$T/root/.config/retroarch/retroarch.cfg"; then ok "global mode 1 (non-forced: N64/PSX keep real analog)"; else bad "analog_dpad_mode not set globally"; fi
+if grep -q 'analog_dpad_mode = "3"' "$T/root/.config/retroarch/config/MAME 2003-Plus/MAME 2003-Plus.cfg"; then ok "MAME keeps forced mode 3"; else bad "MAME override lost"; fi
 echo "=== everything else still intact ==="
 [ "$(md5sum $T/boot/zImage | cut -d' ' -f1)" = "a6ab2523a5e8dd0052c40ef069e8ed6f" ] && ok "thermal kernel" || bad "kernel changed"
 grep -q '^GPU_MAX_DCIN=384000000' "$T/etc/init.d/S05powercap" && ok "GPU at stock" || bad "GPU cap"

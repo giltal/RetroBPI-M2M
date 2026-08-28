@@ -4297,9 +4297,109 @@ no NEW warning appears (count stayed at 3), then `fsck -n` reporting no dirty
 bit. Trusting the repair message alone would not have distinguished "fixed" from
 "reported fixed".
 
+### N64 resolution: a step, not a curve -- and two bugs the user found
+
+#### The resolution table
+
+Measured at the stock 384 MHz GPU, Mario Kart 64, total time to a fixed frame
+count minus separately measured startup:
+
+```
+res         emulate     fps    vs60   pixels/frame
+320x240      79.87 s   71.4    119%      76,800
+400x300     103.41 s   55.1     92%     120,000
+480x360     103.95 s   54.8     91%     172,800
+512x384     104.09 s   54.8     91%     196,608
+576x432     105.25 s   54.2     90%     248,832
+640x480     104.04 s   54.8     91%     307,200
+```
+
+**Above native, resolution is free.** From 400x300 to 640x480 the pixel count
+rises 2.6x and the speed does not move. Five independent points agreeing makes it
+solid. So there is no trade curve to tune along -- there is a STEP: 320x240 at
+119%, or anything larger at ~91%. An intermediate setting gives the slow speed
+with a worse picture, which is why the Settings toggle offers exactly two
+choices.
+
+**The bottleneck is the geometry processor, not fill rate.** Pixel count does not
+matter but GPU clock does (31.0 / 42.5 / 50.9 fps at 144 / 240 / 384 MHz).
+Mali-400 splits GP (vertex) from PP (fragment); Mario Kart submits the same
+geometry at any output size, so the PP has fill headroom to spare while the GP,
+which runs at core clock, is the limit. The 320x240 step is rice taking a
+different path at the N64's native size, worth about 4.2 ms/frame.
+
+#### Correction: "528 MHz gives no gain" was wrong, and the user caught it
+
+The earlier verdict came from a two-point delta, `t(N2) - t(N1)`. That subtracts
+two ~100 s measurements to extract a ~17 s window, so the variance of BOTH totals
+lands on the small result. Interleaved A/B, three rounds:
+
+```
+gpu       t(N1)    t(N2)    delta     fps
+384MHz    90.60   105.45    14.85    60.6
+384MHz    88.06   105.58    17.52    51.4
+384MHz    87.42   105.81    18.39    48.9      <- 48.9-60.6 fps at a FIXED clock
+528MHz    85.08   102.53    17.45    51.6
+528MHz    85.07   102.25    17.18    52.4
+528MHz    85.02   101.81    16.79    53.6
+```
+
+The delta column is noise. The totals are not: 528 MHz won all six pairs, with a
+spread of three hundredths of a second on t(N1). Time to frame 4800 was 88.69 s
+at 384 vs 85.06 s at 528 -- **528 MHz is worth ~3.5%, not 0%.**
+
+The method was introduced to cancel startup and title-screen cost, and in doing
+so amplified noise roughly six-fold. The clock was also verified to HOLD mid-run
+(sampled from debugfs while frames were rendering), and devfreq's cur_freq was
+checked against the actual hardware rate -- devfreq reports the OPP it selected,
+not what the silicon is doing, so it can lie. It was not lying here.
+
+The user reported seeing gameplay differences while the clock changed. That
+observation was correct and the measurement was wrong.
+
+#### N64 would not launch from Recents: a case-sensitivity bug
+
+```
+/opt/roms/N64/Mario Kart 64 (USA).zip     directory is capital N64
+g_systems[] dir_name = "n64"              table is lowercase
+match:  strstr(path, "n64")               case-SENSITIVE
+```
+
+No match -> `system_idx` stayed -1 -> the launch is guarded by
+`if (e->system_idx >= 0)`, so pressing A did nothing whatsoever, silently. Atari
+and MAME worked only because those folders happen to be lowercase; N64 is the
+sole capitalised directory on the card. The ROM partition is vfat mounted
+`shortname=mixed`, so directory case is whatever the user created.
+
+Browsing worked because it never re-derives the system -- it already knows which
+folder it is in. And the directory scanner had it right all along
+(`strcasecmp(de->d_name, ...)`), so the correct pattern was already in the file.
+
+**Favorites had the identical bug.** Both now use `system_from_path()`, which
+matches the path COMPONENT case-insensitively -- also removing a second hazard,
+since `strstr` with first-match-wins would happily assign the wrong core to any
+path containing a short system name like "gb".
+
+Unit-tested on the host before deployment: 10 cases including the exact failing
+path, future capitalised folders, files outside the ROM tree, and files with no
+subdirectory.
+
+#### Analog stick on 2D cores
+
+The pad's stick was mapped by the autoconfig (`input_l_x`/`input_l_y`) but
+nothing consumed it: `analog_dpad_mode` was never set globally and RetroArch
+defaults to 0, so on NES, Genesis, Game Boy and the rest only the d-pad worked.
+
+Set `input_player1/2_analog_dpad_mode = "1"` globally. Mode 1 rather than 3
+deliberately: non-forced means RetroArch skips the mapping for cores that
+genuinely take analog, so **N64 and PlayStation keep a real analog stick** while
+every 2D core gains one. Mode 3 would override N64 too and undo the Mario Kart
+steering work. MAME keeps its forced mode 3 override, ported from Lyra, which had
+reached the same two settings.
+
 ### Current state (2026-08-26)
 
-`firmware/sdcard.img` md5 `c6e1efba8d4147dbbd3a0ecd932323be`. Board verified
+`firmware/sdcard.img` md5 `2e0bc2e52dee587c5e9ae827097cd188`. Board verified
 byte-identical to this image across all 27 checked files plus kernel and DTB, so
 SSH pushes and a fresh flash produce the same system.
 

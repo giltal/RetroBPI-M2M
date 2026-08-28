@@ -1,0 +1,72 @@
+#!/bin/sh
+#
+# Toggle the experimental N64 "nice visuals" mode: 640x480 with the Mali at
+# 528 MHz, instead of the shipping 320x240 at the stock 384 MHz.
+#
+# WHY THESE TWO SETTINGS AND NOT OTHERS
+#
+# Measured, Mario Kart 64, time to a fixed frame count minus startup:
+#
+#     320x240 -> 71.4 fps (119%)      480x360 -> 54.8 fps (91%)
+#     400x300 -> 55.1 fps  (92%)      512x384 -> 54.8 fps (91%)
+#                                     640x480 -> 54.8 fps (91%)
+#
+# Above 320x240 the resolution is FREE: 2.6x the pixels from 400x300 to 640x480
+# costs nothing measurable. So there is no reason to pick an intermediate size --
+# it is 320x240 for full speed, or 640x480 for the best picture, and nothing in
+# between is worth having.
+#
+# The bottleneck is the geometry processor, not fill rate: pixel count does not
+# matter but GPU CLOCK does (31.0 / 42.5 / 50.9 fps at 144 / 240 / 384 MHz).
+# Mali-400 splits GP (vertex) from PP (fragment); the PP has fill headroom to
+# spare while the GP, which runs at core clock, is the limit.
+#
+# 528 MHz adds ~3.5% on top (measured over 3 interleaved A/B rounds: time to
+# frame 4800 was 88.69 s at 384 vs 85.06 s at 528, winning all six pairs).
+#
+# WHAT YOU ARE TRADING
+#
+# ~91% of full speed, rising to ~94% with the overclock. That is the same regime
+# that produced stretched, "dirty" audio before -- RetroArch's dynamic rate
+# control hides a slow emulator by resampling, and you hear it. Full speed at
+# 640x480 is NOT reachable on this silicon.
+#
+# The overclock also has NO safety net: the A33 mali_opp_table carries no
+# opp-microvolt, lima reports "no regulator (mali) found", and no GPU cooling
+# device is registered. 600 MHz is genuinely unstable (~1970 lima faults), which
+# is why this stops at 528. Watch the temperature during a long session:
+#     cat /sys/class/thermal/thermal_zone0/temp
+# 63 C was the peak at 320x240/384 MHz, against a 75 C first passive trip.
+
+OPT="/root/.config/retroarch/config/ParaLLEl N64/ParaLLEl N64.opt"
+PWR=/etc/init.d/S05powercap
+D=/sys/class/devfreq/1c40000.gpu
+
+case "$1" in
+	on)
+		sed -i 's/^parallel-n64-screensize = .*/parallel-n64-screensize = "640x480"/' "$OPT"
+		sed -i 's/^GPU_MAX_DCIN=.*/GPU_MAX_DCIN=528000000/' "$PWR"
+		echo 144000000 > $D/min_freq 2>/dev/null
+		echo 528000000 > $D/max_freq 2>/dev/null
+		sync
+		echo "n64-hires ON : 640x480, GPU up to $(( $(cat $D/max_freq) / 1000000 )) MHz"
+		;;
+	off)
+		sed -i 's/^parallel-n64-screensize = .*/parallel-n64-screensize = "320x240"/' "$OPT"
+		sed -i 's/^GPU_MAX_DCIN=.*/GPU_MAX_DCIN=384000000/' "$PWR"
+		echo 144000000 > $D/min_freq 2>/dev/null
+		echo 384000000 > $D/max_freq 2>/dev/null
+		sync
+		echo "n64-hires OFF: 320x240, GPU up to $(( $(cat $D/max_freq) / 1000000 )) MHz"
+		;;
+	status|"")
+		echo "  resolution : $(sed -n 's/^parallel-n64-screensize = //p' "$OPT")"
+		echo "  GPU cap    : $(( $(cat $D/max_freq) / 1000000 )) MHz (boot default $(sed -n 's/^GPU_MAX_DCIN=//p' "$PWR" | head -1 | cut -c1-3) MHz)"
+		echo "  GPU now    : $(( $(cat /sys/kernel/debug/clk/gpu/clk_rate 2>/dev/null || echo 0) / 1000000 )) MHz"
+		echo "  temp       : $(( $(cat /sys/class/thermal/thermal_zone0/temp) / 1000 )) C"
+		;;
+	*)
+		echo "usage: n64-hires {on|off|status}"; exit 1
+		;;
+esac
+exit 0
