@@ -167,6 +167,22 @@ static void adjust_volume(int up)
 }
 static void power_off(void)
 {
+	/* Leave a breadcrumb BEFORE anything else, on the rootfs (ext4) so it survives
+	 * even if the FAT partition is lost. Without it there is no way to tell
+	 * 'volumed never saw the key' from 'volumed saw it and the shutdown still went
+	 * wrong' -- and those need completely different fixes. */
+	{
+		FILE *f = fopen("/root/volumed_power", "a");
+		if (f) {
+			FILE *u = fopen("/proc/uptime", "r");
+			double up = -1;
+			if (u) { if (fscanf(u, "%lf", &up) != 1) up = -1; fclose(u); }
+			fprintf(f, "KEY_POWER seen at uptime %.2f\n", up);
+			fflush(f);
+			fclose(f);
+		}
+		sync();
+	}
 	/* Flush before asking init to stop anything. The whole point of handling
 	 * this key is that the alternative -- holding the button until the PMIC
 	 * cuts the rail -- loses unwritten data. */

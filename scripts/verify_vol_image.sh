@@ -46,6 +46,10 @@ if [ "$T/usr/bin/retrobpi_launcher" -nt "$L" ]; then ok "launcher binary newer t
 echo "=== analog stick as d-pad on 2D cores ==="
 if grep -q '^input_player1_analog_dpad_mode = "1"' "$T/root/.config/retroarch/retroarch.cfg"; then ok "global mode 1 (non-forced: N64/PSX keep real analog)"; else bad "analog_dpad_mode not set globally"; fi
 if grep -q 'analog_dpad_mode = "3"' "$T/root/.config/retroarch/config/MAME 2003-Plus/MAME 2003-Plus.cfg"; then ok "MAME keeps forced mode 3"; else bad "MAME override lost"; fi
+echo "=== clean shutdown from inside a game ==="
+if grep -q "saving game" "$T/etc/init.d/S12launcher"; then ok "S12launcher SIGTERMs RetroArch and waits (saves flush)"; else bad "RetroArch would be SIGKILLed by init - SRAM at risk"; fi
+if strings "$T/usr/bin/volumed" | grep -q "KEY_POWER seen at uptime"; then ok "volumed records that it saw the power key"; else bad "no power-key breadcrumb"; fi
+if grep -q "shutdown_trace" "$T/etc/init.d/rcK" 2>/dev/null; then bad "diagnostic rcK trace leaked into the image"; else ok "rcK is pristine (no diagnostic trace shipped)"; fi
 echo "=== everything else still intact ==="
 [ "$(md5sum $T/boot/zImage | cut -d' ' -f1)" = "a6ab2523a5e8dd0052c40ef069e8ed6f" ] && ok "thermal kernel" || bad "kernel changed"
 grep -q '^GPU_MAX_DCIN=384000000' "$T/etc/init.d/S05powercap" && ok "GPU at stock" || bad "GPU cap"

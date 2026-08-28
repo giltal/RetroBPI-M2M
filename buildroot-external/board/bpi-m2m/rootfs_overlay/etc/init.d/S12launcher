@@ -57,6 +57,36 @@ stop() {
 	#     [Video]: Cannot open video driver.. Exiting..
 	# which looks like a graphics bug and is really a stale process.
 	printf "Stopping %s: " "$DAEMON"
+
+	# STOP THE GAME FIRST, and give it a chance to save.
+	#
+	# RetroArch is forked by the launcher and is not managed by any init script,
+	# so nothing here used to touch it. Powering off DURING A GAME therefore left
+	# it running with the ROM and rootfs open: inittab runs "umount -a -r" before
+	# init sends its blanket SIGKILL, so the umount failed and both filesystems
+	# were left dirty -- "EXT4-fs: recovery required" and the FAT dirty bit. Worse,
+	# RetroArch was then SIGKILLed without flushing, so a mid-game power-off could
+	# lose SRAM.
+	#
+	# This was missed because the earlier shutdown test was run from the MENU,
+	# where only the launcher is alive and the shutdown really is clean. The bug
+	# only appears the way the console is actually used.
+	#
+	# SIGTERM first: RetroArch commits its save files on a clean teardown. Only
+	# escalate if it will not go. parallel-n64 SIGSEGVs on exit anyway, which is
+	# fine here -- the saves are written before that point.
+	if pidof retroarch.bin >/dev/null 2>&1; then
+		printf "(saving game) "
+		killall retroarch.bin 2>/dev/null
+		i=0
+		while pidof retroarch.bin >/dev/null 2>&1; do
+			i=$((i + 1))
+			[ "$i" -gt 8 ] && { killall -9 retroarch.bin 2>/dev/null; break; }
+			sleep 1
+		done
+		sync
+	fi
+
 	[ -f "$PIDFILE" ] && start-stop-daemon --stop --quiet --pidfile "$PIDFILE"
 
 	# Escalate: TERM by name, then KILL. The launcher holds DRM master, so a

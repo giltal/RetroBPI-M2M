@@ -4397,9 +4397,59 @@ every 2D core gains one. Mode 3 would override N64 too and undo the Mario Kart
 steering work. MAME keeps its forced mode 3 override, ported from Lyra, which had
 reached the same two settings.
 
+#### Powering off from inside a game left both filesystems dirty
+
+Reported after a real power-off: `EXT4-fs: recovery required` and the FAT dirty
+bit, despite a short press on the power key -- which had tested clean earlier.
+
+**The earlier test was the flaw.** It was run from the MENU, where the only thing
+alive is the launcher. Powering off during a GAME is a different path, and that
+is how the console is actually used. A marker planted in `rcK` (on the rootfs, so
+it survives a FAT loss) is what settled it.
+
+`inittab` runs shutdown actions in order -- `rcK`, `swapoff`, `umount -a -r` --
+and only afterwards does init send its blanket SIGTERM/SIGKILL. RetroArch is
+forked by the launcher and is managed by no init script, so nothing stopped it:
+it was still running when `umount` ran, and was then SIGKILLed without ever
+flushing. A mid-game power-off could therefore lose SRAM.
+
+`S12launcher stop()` now SIGTERMs RetroArch and waits for it to exit (escalating
+to SIGKILL after 8 s) before stopping the launcher. Measured on hardware,
+powering off from inside a game:
+
+```
+rcK START 971.96
+rcK END   977.03      -> ran to completion, 5.1 s
+ext4 recovery required : 0
+FAT dirty              : 0
+```
+
+Clean, for the first time after a mid-game power-off. Shutdown is ~1 s slower
+than from the menu (5.1 s vs 4.5 s); that second is RetroArch being given time to
+save, which is the right trade.
+
+**A theory of mine was wrong and is worth recording as such.** I claimed
+RetroArch held the ROM partition open and that is why `umount` failed. It holds
+ZERO fds on /opt/roms -- it reads the ROM into memory and closes it -- and
+`umount /opt/roms` succeeded with a game running. So the fix works, but the
+mechanism is more likely that RetroArch now exits in an orderly way, flushing its
+own writes, rather than being killed with dirty buffers. One clean run is also
+not proof; the failure came from real usage, so the confirmation is it staying
+clean over several more power-offs.
+
+A test of mine also broke the board mid-diagnosis: it unmounted /opt/roms without
+remounting, and the follow-up "STILL BUSY" was simply a second umount of an
+already-unmounted filesystem, not evidence of anything. Remounted, 1548 ROMs
+intact.
+
+`volumed` now writes `KEY_POWER seen at uptime N` to the rootfs before powering
+down, so the next investigation can distinguish "the key was never seen" from
+"seen, and the shutdown still went wrong" without inferring it from filesystem
+damage after the fact.
+
 ### Current state (2026-08-26)
 
-`firmware/sdcard.img` md5 `2e0bc2e52dee587c5e9ae827097cd188`. Board verified
+`firmware/sdcard.img` md5 `f334b275a526b601ef009bc96dd63010`. Board verified
 byte-identical to this image across all 27 checked files plus kernel and DTB, so
 SSH pushes and a fresh flash produce the same system.
 
