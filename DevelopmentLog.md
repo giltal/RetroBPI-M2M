@@ -4028,9 +4028,74 @@ begin -- which is now a graceful slowdown rather than, as before, nothing at all
 watching. It also reinforces the overclock verdict independently: raising the
 Mali clock would have spent part of that 12 C for a measured ~1%.
 
+### Volume that sticks, and the power button that was eating the pairing
+
+Two complaints that turned out to share a root: "the console is loud and turning
+it down never lasts", and "the Bluetooth pad will not connect" -- twice.
+
+#### Volume: the hotkeys were adjusting something that is thrown away
+
+`input_volume_up_btn`/`down_btn` drove RetroArch's INTERNAL `audio_volume`, an
+in-memory dB gain discarded when RetroArch exits. Every launch therefore started
+at full volume again. It could not simply be persisted:
+
+- `config_save_on_exit` is off deliberately -- enabling it made RetroArch rewrite
+  `audio_driver` to `"null"` and `audio_device` to `""` (already recorded in
+  retroarch.cfg from an earlier session);
+- RetroArch never logs volume changes, so there is nothing to scrape -- a 93 KB
+  verbose log contains no volume line at all, and the live config had no
+  `audio_volume` key, only a comment about it;
+- an on-exit save would miss N64 regardless, because parallel-n64 SIGSEGVs on
+  teardown every single run.
+
+So volume moved to the ALSA mixer, which `S35alsa` already persists with
+`alsactl store`/`restore`. `volumed` watches the pad directly and moves the
+`Headphone` control -- the final analog stage into the PH9 amp, and the reason
+100% was painful. Default dropped to 70%.
+
+The RetroArch bindings had to be REMOVED, not left alongside, or each press
+applies twice: once in the mixer and once in software gain.
+
+**The button codes were derived, not guessed.** Decoding the pad's `B: KEY=`
+bitmap gives evdev codes 304/306/307/308/310-318 and 544-547; ordering them
+ascending and indexing reproduces RetroArch's autoconfig exactly -- 304->0,
+310->4, 314->8, 316->10, 317->11, 544->13, 545->14, all twelve matching. That
+also explains this clone's oddity: it reports `BTN_C` for A because `BTN_EAST` is
+absent entirely. So PS is `BTN_MODE` and volume is the d-pad, confirmed rather
+than assumed, and no button-pressing session was needed.
+
+#### The pad kept unpairing because nothing handled the power button
+
+The bond under `/var/lib/bluetooth/02:00:00:42:50:49/` was written, verified, and
+then lost -- twice. Each following boot logged `EXT4-fs: recovery required`.
+
+`axp20x-pek` presents `KEY_POWER` on `/dev/input/event1`, and **nothing was
+listening**: no acpid, nothing in inittab. A short press did nothing at all, so
+the only way to switch the console off was to hold the button until the AXP223
+cut the rail -- an abrupt power loss with no filesystem flush.
+
+This took two occurrences to find because every reboot issued over SSH was
+clean, and a marker planted in `rcK` confirmed the shutdown path itself works
+perfectly. The failure only happens the way a console is actually used. A first
+theory -- that shutdown was broken -- was tested and refuted before landing on
+the power key.
+
+`volumed` now handles `KEY_POWER`: sync, sync, `poweroff`. It also syncs a few
+seconds after the pad appears, so a freshly written link key is committed rather
+than left in page cache where a power cut eats it.
+
+**The stakes are not the pad.** The same window can lose `.srm` saves written
+seconds earlier. Checked: all 21 save files are byte-identical to the backup
+taken before this session, and none are zero-length -- the power cuts happened to
+catch the bond rather than a save. That was luck.
+
+Remaining exposure: pulling the plug still loses whatever ext4 has not committed.
+Mounting with `commit=1` would narrow that at the cost of SD wear; not done,
+because a working power button addresses the case that actually occurs.
+
 ### Current state (2026-08-26)
 
-`firmware/sdcard.img` md5 `3dc66880fd11ae427a0b34bd8457f1b2`. Board verified
+`firmware/sdcard.img` md5 `d5ffd5e89244739a5d64125882049da3`. Board verified
 byte-identical to this image across all 27 checked files plus kernel and DTB, so
 SSH pushes and a fresh flash produce the same system.
 
